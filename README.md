@@ -1,5 +1,7 @@
 # WebPatch
 
+日本語 | [English](#english)
+
 WebPatch は、構築したウェブサイトに対するフィードバック、修正依頼、反映確認のコミュニケーションを円滑にするための、ウェブ制作向けコミュニケーション支援ツールです。
 
 HTML サイトをアップロードまたは URL から取り込み、実際のブラウザ表示を見ながらページ上の要素に直接コメントを残せます。制作担当者、確認担当者、クライアントの間で起きやすい「どのページのどの部分の話か分からない」「修正依頼が散らばる」「対応済みか確認しづらい」といった問題を減らすことを目的にしています。
@@ -301,6 +303,317 @@ AI 確認機能は、コメント内容と現在の HTML を照合して反映�
 - 制作会社と発注者の間の確認コミュニケーション
 - スプレッドシートだけでは指摘箇所が伝わりにくいレビュー
 
+## English
+
+[Japanese](#webpatch) | English
+
+WebPatch is a communication support tool for web production teams. It helps teams collect feedback, manage change requests, and confirm whether requested changes have been reflected in a built website.
+
+You can upload an HTML site or import pages from URLs, preview the site in a browser-like review screen, and leave comments directly on page elements. The goal is to reduce common production handoff problems such as unclear feedback locations, scattered revision requests, and uncertainty about whether a fix has been completed.
+
+### Problems WebPatch Helps Solve
+
+Website feedback is often spread across email, chat, spreadsheets, screenshots, and meeting notes. That creates several recurring problems:
+
+- Reviewers need to explain the target page, viewport, screenshot, and affected element in words
+- Developers spend time finding what each comment refers to
+- Replies, status updates, and final confirmation are split across multiple tools
+- Sharing unpublished or exported HTML sites is cumbersome
+- It is hard to confirm whether older feedback has actually been reflected
+
+WebPatch brings HTML preview, element-level comments, status management, public review links, and AI-assisted reflection checks into one workspace.
+
+### Key Features
+
+#### Site Registration
+
+- Upload a ZIP file containing HTML and assets
+- Import pages from a CSV list of URLs on the same domain
+- Import and refresh sites protected by Basic authentication
+- Refresh registered URL-based sites by fetching the latest HTML
+- Replace a single page or the entire site for ZIP-based projects
+
+#### Browser-Based Review
+
+- Preview registered HTML pages inside an iframe
+- Switch preview width between desktop, tablet, and mobile
+- Move between pages from the page list
+- Rewrite relative links, images, CSS, and JavaScript paths through WebPatch routes
+- Open the preview in a separate tab for full-screen review
+
+#### Comments and Communication
+
+- Add comments directly to page elements
+- Reply in comment threads
+- Edit, delete, resolve, and reopen comments
+- Mark comments as waiting for confirmation
+- Attach images to comments
+- Show unresolved comment indicators per page
+- Support both logged-in members and guest reviewers
+
+#### Sharing and Public Review
+
+- Share projects with registered users
+- Grant comment-only or editable access
+- Send invite links to unregistered users
+- Create public links for guest review without login
+- Disable or regenerate public links
+
+#### Comment Sheet and External API
+
+- View comments in a sheet-style interface
+- Check status, desired due date, and AI check results in one place
+- Issue API tokens for external tools
+- Fetch and update comments through the sheet API
+- Manage `todo`, `doing`, and `done` statuses
+
+#### AI Reflection Check
+
+- Store OpenAI, Gemini, and Grok API keys per user
+- Compare comment requests with the current HTML
+- Save results as `not applicable`, `reflected`, `not reflected`, `uncertain`, or `error`
+- Reset the AI check status when a comment is edited
+
+#### Notes
+
+- Upload Markdown files as notes
+- Edit, append to, and replace note content
+- Share notes with members
+- Create public note links
+- Keep production notes, review criteria, and meeting notes in the same workspace
+
+### Basic Workflow
+
+1. Register a user and log in
+2. Register an HTML site from the dashboard
+   - Upload a ZIP file
+   - Or import pages from a CSV URL list
+3. Open a project and review the target page
+4. Select an element in the preview and add a comment
+5. Reply, update, fix, and manage comment status
+6. Run AI checks when you want to confirm whether comments have been reflected
+7. Share progress through the comment sheet or public links
+8. Mark completed comments as resolved
+
+### Intended Users
+
+- Web production companies
+- Freelance web developers and designers
+- Designers, directors, and engineers
+- Teams that collect client review feedback
+- In-house website owners reviewing unpublished pages
+
+### Technical Stack
+
+- PHP
+- MySQL
+- HTML/CSS/JavaScript
+- PHP session authentication
+- PDO database access
+- ZIP extraction for static site import
+- cURL for URL import and AI API calls
+
+WebPatch does not depend on Composer, npm, or a frontend build pipeline.
+
+### Installation
+
+WebPatch is a plain PHP/MySQL application. Install it by placing the files on a PHP-capable web server, creating a MySQL database, and preparing a writable storage directory.
+
+#### 1. Requirements
+
+- PHP 8 or later recommended
+- MySQL or a MySQL-compatible database
+- Apache or Nginx + PHP-FPM
+- Git
+
+Required PHP extensions:
+
+- `pdo_mysql`
+- `zip`
+- `curl`
+- `mbstring`
+- `dom`
+- `openssl`
+- `fileinfo`
+
+#### 2. Clone the Repository
+
+Clone the repository into your web root or another location that your web server can expose.
+
+```bash
+git clone https://github.com/shotaueyama/webpatch.git
+cd webpatch
+```
+
+If `base_url` is `/webpatch`, configure your server so this directory is available at `https://example.com/webpatch/`.
+
+`_app.php` loads `webpatch_app/bootstrap.php`. In the default layout, `webpatch_app` lives inside the same repository directory.
+
+#### 3. Create the Configuration File
+
+Copy the example config file:
+
+```bash
+cp webpatch_app/config.example.php webpatch_app/config.php
+```
+
+Edit `webpatch_app/config.php` for your environment.
+
+```php
+<?php
+
+return [
+    'base_url' => '/webpatch',
+    'storage_root' => '/var/www/webpatch_storage',
+    'key_encryption_secret' => 'use-a-long-random-secret-string',
+    'database' => [
+        'dsn' => 'mysql:host=localhost;dbname=webpatch;charset=utf8mb4',
+        'user' => 'webpatch_user',
+        'password' => 'database-password',
+        'table_prefix' => 'webpatch_',
+    ],
+];
+```
+
+`config.php` contains database credentials and the encryption secret, so do not commit it to Git. It is already included in `.gitignore`.
+
+#### 4. Create the Database
+
+Create a database and user in MySQL.
+
+```sql
+CREATE DATABASE webpatch CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'webpatch_user'@'localhost' IDENTIFIED BY 'database-password';
+GRANT ALL PRIVILEGES ON webpatch.* TO 'webpatch_user'@'localhost';
+FLUSH PRIVILEGES;
+```
+
+Import the base schema:
+
+```bash
+mysql -u webpatch_user -p webpatch < webpatch_app/schema.sql
+```
+
+Some additional tables and columns are created automatically at runtime.
+
+#### 5. Create the Storage Directory
+
+Create the directory configured as `storage_root` and make it writable by the web server user.
+
+Example for Ubuntu/Debian using `www-data`:
+
+```bash
+sudo mkdir -p /var/www/webpatch_storage
+sudo chown -R www-data:www-data /var/www/webpatch_storage
+sudo chmod 750 /var/www/webpatch_storage
+```
+
+Stored data includes:
+
+- Uploaded or fetched HTML sites
+- Original file snapshots
+- Comment attachment images
+- PHP session files
+- URL import metadata
+
+#### 6. Expose the App Through a Web Server
+
+Serve the PHP files in this repository through Apache or Nginx.
+
+Apache example:
+
+```apache
+Alias /webpatch /var/www/webpatch
+
+<Directory /var/www/webpatch>
+    Options -Indexes
+    AllowOverride All
+    Require all granted
+</Directory>
+```
+
+Nginx + PHP-FPM example:
+
+```nginx
+location /webpatch/ {
+    alias /var/www/webpatch/;
+    index index.php;
+    try_files $uri $uri/ /webpatch/index.php?$query_string;
+}
+
+location ~ ^/webpatch/(.+\.php)$ {
+    alias /var/www/webpatch/$1;
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME /var/www/webpatch/$1;
+    fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+}
+```
+
+Adjust paths and the PHP-FPM socket for your server.
+
+#### 7. Configure PHP Upload Limits
+
+`.user.ini` contains upload-related defaults:
+
+```ini
+upload_max_filesize=100M
+post_max_size=110M
+max_file_uploads=20
+```
+
+Make sure equivalent limits are active in your server-level PHP configuration.
+
+#### 8. First Access
+
+Open `https://example.com/webpatch/` in a browser and register the first user.
+
+User registration is limited by `WEBPATCH_MAX_USERS`. The current code allows up to 5 users.
+
+#### 9. Optional AI Setup
+
+To use AI-assisted reflection checks, open the account settings screen and register API keys for OpenAI, Gemini, or Grok.
+
+The core features, including site registration, comments, sharing, and public review links, work without AI API keys.
+
+### Important Files
+
+- `dashboard.php`: Site list and ZIP/URL registration
+- `project.php`: Review screen for logged-in users
+- `public-project.php`: Public review screen
+- `comments.php`: Comment API for logged-in users
+- `public-comments.php`: Guest comment API
+- `comment-sheet.php`: Sheet-style comment view
+- `sheet-api.php`: External comment sheet API
+- `ai-check-comments.php`: AI-assisted reflection checks
+- `account.php`: Account and AI API settings
+- `notes.php`, `note.php`: Note list and note detail
+- `webpatch_app/bootstrap.php`: Shared application logic
+- `webpatch_app/layout.php`: Shared layout
+- `webpatch_app/schema.sql`: Base database schema
+
+### Security and Operations Notes
+
+- Do not commit `webpatch_app/config.php`.
+- Replace `key_encryption_secret` with a long, random secret.
+- AI API keys are encrypted with AES-256-GCM, but both the encryption key and database must be protected.
+- If you import a site using Basic authentication, the credentials are stored in URL import metadata under the storage directory. Protect storage permissions carefully.
+- Anyone with a public link token can access that public review page. Disable or regenerate public links when they are no longer needed.
+- PHP and other executable extensions are excluded from uploaded ZIP files, but your web server should also prevent direct execution from the storage directory.
+- Uploaded HTML, comment images, and fetched site files may contain confidential information. Define backup, deletion, and access-control rules before production use.
+
+### Good Use Cases
+
+- Client review for unpublished websites
+- Landing page and corporate site revision checks
+- Review of static HTML deliverables
+- Managing feedback across multiple pages
+- Communication between web production teams and clients
+- Reviews where spreadsheets alone make it hard to identify the exact target element
+
 ## ライセンス
 
 現時点ではライセンス未設定です。利用、再配布、公開範囲を決める場合は、別途 `LICENSE` を追加してください。
+
+## License
+
+No license has been set yet. Add a `LICENSE` file before defining usage, redistribution, or public release terms.
