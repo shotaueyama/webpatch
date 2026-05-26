@@ -65,10 +65,11 @@ function render_auth_page(string $title, string $eyebrow, string $heading, strin
 function render_app_page(string $title, string $content, string $mainClass = '', string $headerControls = ''): void
 {
     $user = current_user();
+    $language = current_app_language();
     $flash = take_flash();
     $flashAsToast = $flash !== null && (($flash['type'] ?? '') === 'success' || str_contains(' ' . $mainClass . ' ', ' project-main '));
     ?><!doctype html>
-<html lang="ja">
+<html lang="<?= h($language) ?>">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -83,28 +84,28 @@ function render_app_page(string $title, string $content, string $mainClass = '',
     <div class="app-shell">
       <header class="app-header">
         <div class="header-left">
-          <a class="brand" href="<?= h(base_url('dashboard.php')) ?>" aria-label="WebPatch ダッシュボード">
+          <a class="brand" href="<?= h(base_url('dashboard.php')) ?>" aria-label="<?= h(app_text('dashboard_aria', $language)) ?>">
             <span class="brand-mark" aria-hidden="true">W</span>
             <span>WebPatch</span>
           </a>
           <?php if ($user !== null): ?>
-            <nav class="header-nav header-nav-desktop" aria-label="メインナビゲーション">
-              <a href="<?= h(base_url('dashboard.php')) ?>">サイト一覧</a>
-              <a href="<?= h(base_url('notes.php')) ?>">ノート</a>
-              <a href="<?= h(base_url('account.php')) ?>">アカウント設定</a>
+            <nav class="header-nav header-nav-desktop" aria-label="<?= h(app_text('main_navigation', $language)) ?>">
+              <a href="<?= h(base_url('dashboard.php')) ?>"><?= h(app_text('dashboard', $language)) ?></a>
+              <a href="<?= h(base_url('notes.php')) ?>"><?= h(app_text('notes', $language)) ?></a>
+              <a href="<?= h(base_url('account.php')) ?>"><?= h(app_text('account_settings', $language)) ?></a>
             </nav>
           <?php endif; ?>
         </div>
         <?php if ($user !== null): ?>
           <button class="header-menu-button" type="button" data-header-menu-toggle aria-controls="header-menu" aria-expanded="false">
             <span aria-hidden="true"></span>
-            <span class="sr-only">メニュー</span>
+            <span class="sr-only"><?= h(app_text('menu', $language)) ?></span>
           </button>
           <div class="header-menu" id="header-menu" data-header-menu>
-            <nav class="header-nav header-nav-mobile" aria-label="メインナビゲーション">
-              <a href="<?= h(base_url('dashboard.php')) ?>">サイト一覧</a>
-              <a href="<?= h(base_url('notes.php')) ?>">ノート</a>
-              <a href="<?= h(base_url('account.php')) ?>">アカウント設定</a>
+            <nav class="header-nav header-nav-mobile" aria-label="<?= h(app_text('main_navigation', $language)) ?>">
+              <a href="<?= h(base_url('dashboard.php')) ?>"><?= h(app_text('dashboard', $language)) ?></a>
+              <a href="<?= h(base_url('notes.php')) ?>"><?= h(app_text('notes', $language)) ?></a>
+              <a href="<?= h(base_url('account.php')) ?>"><?= h(app_text('account_settings', $language)) ?></a>
             </nav>
             <?php if ($headerControls !== ''): ?>
               <div class="header-controls">

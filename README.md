@@ -75,6 +75,14 @@ WebPatch は、HTML プレビュー、要素単位のコメント、ステータ
 - ノートのメンバー共有、公開リンク発行
 - 制作メモ、確認観点、議事録などを同じワークスペース内で扱える
 
+### 表示言語切り替え
+
+- アカウント設定画面から、日本語と英語をユーザーごとに選択
+- 選択した言語はユーザー設定として保存
+- 共通ヘッダー、アカウント設定、ダッシュボード、ノート一覧などの基本 UI に反映
+- 未設定時や不正な値の場合は日本語を使用
+- 言語設定は `webpatch_ai_user_preferences.app_language` に保存
+
 ## 基本的な利用フロー
 
 1. ユーザー登録、ログイン
@@ -189,6 +197,8 @@ mysql -u webpatch_user -p webpatch < webpatch_app/schema.sql
 
 一部の追加テーブルやカラムは、アプリ実行時に自動作成、追加されます。
 
+表示言語設定では `webpatch_ai_user_preferences` テーブルの `app_language` カラムを使用します。既存環境では、アプリ実行時に不足カラムが自動追加されます。
+
 ### 5. ストレージディレクトリを作成
 
 `storage_root` に指定したディレクトリを作成し、Web サーバー実行ユーザーが読み書きできるようにします。
@@ -278,7 +288,7 @@ AI 確認機能は、コメント内容と現在の HTML を照合して反映�
 - `comment-sheet.php`: コメントのシート表示
 - `sheet-api.php`: コメントシート外部 API
 - `ai-check-comments.php`: AI によるコメント反映確認
-- `account.php`: アカウント、AI API 設定
+- `account.php`: アカウント、表示言語、AI API 設定
 - `notes.php`, `note.php`: ノート一覧、ノート詳細
 - `webpatch_app/bootstrap.php`: 共通ロジック
 - `webpatch_app/layout.php`: 共通レイアウト
@@ -381,6 +391,14 @@ WebPatch brings HTML preview, element-level comments, status management, public 
 - Share notes with members
 - Create public note links
 - Keep production notes, review criteria, and meeting notes in the same workspace
+
+#### Display Language
+
+- Choose Japanese or English per user from the account settings screen
+- Store the selected language as a user preference
+- Apply the language to core UI areas such as the shared header, account settings, dashboard, and notes list
+- Fall back to Japanese when no language is set or an invalid value is found
+- Store the setting in `webpatch_ai_user_preferences.app_language`
 
 ### Basic Workflow
 
@@ -496,6 +514,8 @@ mysql -u webpatch_user -p webpatch < webpatch_app/schema.sql
 
 Some additional tables and columns are created automatically at runtime.
 
+The display language setting uses the `app_language` column on the `webpatch_ai_user_preferences` table. Existing installations add the missing column automatically at runtime.
+
 #### 5. Create the Storage Directory
 
 Create the directory configured as `storage_root` and make it writable by the web server user.
@@ -585,7 +605,7 @@ The core features, including site registration, comments, sharing, and public re
 - `comment-sheet.php`: Sheet-style comment view
 - `sheet-api.php`: External comment sheet API
 - `ai-check-comments.php`: AI-assisted reflection checks
-- `account.php`: Account and AI API settings
+- `account.php`: Account, display language, and AI API settings
 - `notes.php`, `note.php`: Note list and note detail
 - `webpatch_app/bootstrap.php`: Shared application logic
 - `webpatch_app/layout.php`: Shared layout

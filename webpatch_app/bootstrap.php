@@ -1225,10 +1225,21 @@ function ensure_ai_user_preferences_table(): void
         'CREATE TABLE IF NOT EXISTS ' . table_name('ai_user_preferences') . ' (
             user_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
             ai_check_provider VARCHAR(32) NOT NULL DEFAULT \'openai\',
+            app_language VARCHAR(8) NOT NULL DEFAULT \'ja\',
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
     );
+    if (!table_column_exists('ai_user_preferences', 'app_language')) {
+        $table = table_name('ai_user_preferences');
+        try {
+            db()->exec('ALTER TABLE `' . $table . '` ADD COLUMN app_language VARCHAR(8) NOT NULL DEFAULT \'ja\' AFTER ai_check_provider');
+        } catch (PDOException $e) {
+            if ((int) ($e->errorInfo[1] ?? 0) !== 1060) {
+                throw $e;
+            }
+        }
+    }
     $done = true;
 }
 
@@ -1254,6 +1265,52 @@ function save_ai_check_provider_for_user(int $userId, string $provider): void
          ON DUPLICATE KEY UPDATE ai_check_provider = VALUES(ai_check_provider)'
     );
     $stmt->execute([$userId, $provider]);
+}
+
+function normalize_app_language(string $language): string
+{
+    $language = strtolower(trim($language));
+    return in_array($language, ['ja', 'en'], true) ? $language : 'ja';
+}
+
+function app_language_for_user(int $userId): string
+{
+    ensure_ai_user_preferences_table();
+    $stmt = db()->prepare('SELECT app_language FROM ' . table_name('ai_user_preferences') . ' WHERE user_id = ? LIMIT 1');
+    $stmt->execute([$userId]);
+    return normalize_app_language((string) ($stmt->fetchColumn() ?: 'ja'));
+}
+
+function save_app_language_for_user(int $userId, string $language): void
+{
+    $language = normalize_app_language($language);
+    ensure_ai_user_preferences_table();
+    $stmt = db()->prepare(
+        'INSERT INTO ' . table_name('ai_user_preferences') . ' (user_id, app_language)
+         VALUES (?, ?)
+         ON DUPLICATE KEY UPDATE app_language = VALUES(app_language)'
+    );
+    $stmt->execute([$userId, $language]);
+}
+
+function current_app_language(): string
+{
+    $user = current_user();
+    return $user === null ? 'ja' : app_language_for_user((int) $user['id']);
+}
+
+function app_text(string $key, ?string $language = null): string
+{
+    $language = normalize_app_language($language ?? current_app_language());
+    $texts = [
+        'dashboard' => ['ja' => 'サイト一覧', 'en' => 'Sites'],
+        'notes' => ['ja' => 'ノート', 'en' => 'Notes'],
+        'account_settings' => ['ja' => 'アカウント設定', 'en' => 'Account Settings'],
+        'main_navigation' => ['ja' => 'メインナビゲーション', 'en' => 'Main navigation'],
+        'menu' => ['ja' => 'メニュー', 'en' => 'Menu'],
+        'dashboard_aria' => ['ja' => 'WebPatch ダッシュボード', 'en' => 'WebPatch dashboard'],
+    ];
+    return $texts[$key][$language] ?? $texts[$key]['ja'] ?? $key;
 }
 
 function table_column_exists(string $table, string $column): bool
