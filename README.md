@@ -106,29 +106,61 @@ WebPatch は、HTML プレビュー、要素単位のコメント、ステータ
 
 外部 npm パッケージやフロントエンドビルド環境には依存していません。
 
-## セットアップ概要
+## インストール手順
 
-### 1. ファイル配置
+WebPatch は Composer や npm を使わない、素の PHP/MySQL アプリです。基本的には、PHP が動く Web サーバーにファイルを配置し、MySQL と保存ディレクトリを用意すれば動作します。
 
-Web サーバーの公開ディレクトリに、このリポジトリの PHP ファイル一式を配置します。
+### 1. 動作要件
+
+- PHP 8 系推奨
+- MySQL または MySQL 互換 DB
+- Apache または Nginx + PHP-FPM
+- Git
+
+必要な PHP 拡張:
+
+- `pdo_mysql`
+- `zip`
+- `curl`
+- `mbstring`
+- `dom`
+- `openssl`
+- `fileinfo`
+
+### 2. リポジトリを取得
+
+Web サーバーの公開ディレクトリ、または公開ディレクトリにリンクできる場所で clone します。
+
+```bash
+git clone https://github.com/shotaueyama/webpatch.git
+cd webpatch
+```
+
+`base_url` を `/webpatch` にする場合は、`https://example.com/webpatch/` でこのディレクトリが配信されるように配置します。
 
 `_app.php` は `webpatch_app/bootstrap.php` を読み込みます。標準構成では、同じディレクトリ内の `webpatch_app` を参照します。
 
-### 2. 設定ファイル作成
+### 3. 設定ファイルを作成
 
 `webpatch_app/config.example.php` をコピーして `webpatch_app/config.php` を作成します。
+
+```bash
+cp webpatch_app/config.example.php webpatch_app/config.php
+```
+
+環境に合わせて `webpatch_app/config.php` を編集します。
 
 ```php
 <?php
 
 return [
     'base_url' => '/webpatch',
-    'storage_root' => '/var/www/cognify/webpatch_storage',
-    'key_encryption_secret' => 'change-me-to-a-random-64-character-secret',
+    'storage_root' => '/var/www/webpatch_storage',
+    'key_encryption_secret' => '十分に長いランダム文字列',
     'database' => [
-        'dsn' => 'mysql:host=localhost;dbname=quadra_cognify;charset=utf8mb4',
-        'user' => 'webpatch_app',
-        'password' => 'change-me',
+        'dsn' => 'mysql:host=localhost;dbname=webpatch;charset=utf8mb4',
+        'user' => 'webpatch_user',
+        'password' => 'DBパスワード',
         'table_prefix' => 'webpatch_',
     ],
 ];
@@ -136,9 +168,36 @@ return [
 
 `config.php` には DB パスワードや暗号化キーが含まれるため、Git 管理には含めません。このリポジトリでは `.gitignore` に追加済みです。
 
-### 3. ストレージディレクトリ作成
+### 4. データベースを作成
+
+MySQL にデータベースとユーザーを作成します。
+
+```sql
+CREATE DATABASE webpatch CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE USER 'webpatch_user'@'localhost' IDENTIFIED BY 'DBパスワード';
+GRANT ALL PRIVILEGES ON webpatch.* TO 'webpatch_user'@'localhost';
+FLUSH PRIVILEGES;
+```
+
+基本スキーマを流し込みます。
+
+```bash
+mysql -u webpatch_user -p webpatch < webpatch_app/schema.sql
+```
+
+一部の追加テーブルやカラムは、アプリ実行時に自動作成、追加されます。
+
+### 5. ストレージディレクトリを作成
 
 `storage_root` に指定したディレクトリを作成し、Web サーバー実行ユーザーが読み書きできるようにします。
+
+Ubuntu/Debian の Apache や PHP-FPM で `www-data` を使う例:
+
+```bash
+sudo mkdir -p /var/www/webpatch_storage
+sudo chown -R www-data:www-data /var/www/webpatch_storage
+sudo chmod 750 /var/www/webpatch_storage
+```
 
 保存される主なデータ:
 
@@ -148,17 +207,42 @@ return [
 - PHP セッションファイル
 - URL 登録サイトの管理メタデータ
 
-### 4. データベース作成
+### 6. Web サーバーで公開
 
-MySQL にデータベースとユーザーを作成し、`webpatch_app/schema.sql` を実行します。
+このリポジトリの PHP ファイル群を Web サーバーから配信します。
 
-```sql
-SOURCE webpatch_app/schema.sql;
+Apache の例:
+
+```apache
+Alias /webpatch /var/www/webpatch
+
+<Directory /var/www/webpatch>
+    Options -Indexes
+    AllowOverride All
+    Require all granted
+</Directory>
 ```
 
-一部の追加テーブルやカラムは、アプリ実行時に自動作成、追加されます。
+Nginx + PHP-FPM の例:
 
-### 5. PHP 設定
+```nginx
+location /webpatch/ {
+    alias /var/www/webpatch/;
+    index index.php;
+    try_files $uri $uri/ /webpatch/index.php?$query_string;
+}
+
+location ~ ^/webpatch/(.+\.php)$ {
+    alias /var/www/webpatch/$1;
+    include fastcgi_params;
+    fastcgi_param SCRIPT_FILENAME /var/www/webpatch/$1;
+    fastcgi_pass unix:/run/php/php8.2-fpm.sock;
+}
+```
+
+実際の PHP-FPM ソケットや公開パスはサーバー環境に合わせて変更してください。
+
+### 7. PHP アップロード設定
 
 `.user.ini` ではアップロードサイズを調整しています。
 
@@ -169,6 +253,18 @@ max_file_uploads=20
 ```
 
 サーバー側でも同等の設定が反映されるようにしてください。
+
+### 8. 初回アクセス
+
+ブラウザで `https://example.com/webpatch/` を開き、最初のユーザーを登録します。
+
+ユーザー登録数は `WEBPATCH_MAX_USERS` で制限されています。現在のコードでは最大 5 ユーザーです。
+
+### 9. AI 機能を使う場合
+
+アカウント設定画面から OpenAI、Gemini、Grok の API キーを登録します。
+
+AI 確認機能は、コメント内容と現在の HTML を照合して反映状況を判定する機能です。API キーが未設定でも、通常のサイト登録、コメント、共有、公開レビューは利用できます。
 
 ## 主要ファイル
 
