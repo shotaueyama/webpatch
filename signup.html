@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>新規登録 | WebPatch</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="auth-shell">
+      <section class="product-panel" aria-labelledby="product-title">
+        <a class="brand" href="login.php" aria-label="WebPatch ホーム">
+          <span class="brand-mark" aria-hidden="true">W</span>
+          <span>WebPatch</span>
+        </a>
+
+        <div class="product-copy">
+          <p class="eyebrow">HTML editing workspace</p>
+          <h1 id="product-title">HTMLデータを登録し、必要な箇所だけすぐ直せる。</h1>
+          <p class="lead">
+            アップロードしたウェブサイトを一覧で管理し、ページを開いてテキストや表示内容を直接編集できます。
+          </p>
+        </div>
+
+        <div class="feature-list" aria-label="主な特徴">
+          <div class="feature-item">
+            <span class="feature-dot" aria-hidden="true"></span>
+            <span>制作中サイトの更新作業を一元化</span>
+          </div>
+          <div class="feature-item">
+            <span class="feature-dot" aria-hidden="true"></span>
+            <span>非エンジニアでも扱いやすい編集体験</span>
+          </div>
+          <div class="feature-item">
+            <span class="feature-dot" aria-hidden="true"></span>
+            <span>確認、修正、共有までの流れを短縮</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="form-panel" aria-labelledby="form-title">
+        <div class="form-card">
+          <div class="form-header">
+            <p class="eyebrow">Create account</p>
+            <h2 id="form-title">新規登録</h2>
+            <p>はじめに管理用アカウントを作成してください。</p>
+          </div>
+
+          <form class="auth-form" action="signup.php" method="post" novalidate>
+            <div class="field">
+              <label for="name">名前</label>
+              <input id="name" name="name" type="text" autocomplete="name" placeholder="山田 太郎" required>
+              <p class="field-error" aria-live="polite">名前を入力してください。</p>
+            </div>
+
+            <div class="field">
+              <label for="email">メールアドレス</label>
+              <input id="email" name="email" type="email" autocomplete="email" placeholder="name@example.com" required>
+              <p class="field-error" aria-live="polite">有効なメールアドレスを入力してください。</p>
+            </div>
+
+            <div class="field">
+              <label for="password">パスワード</label>
+              <input id="password" name="password" type="password" autocomplete="new-password" placeholder="8文字以上" required minlength="8">
+              <p class="field-error" aria-live="polite">8文字以上のパスワードを入力してください。</p>
+            </div>
+
+            <label class="checkbox-field" for="terms">
+              <input id="terms" name="terms" type="checkbox" required>
+              <span>利用規約とプライバシーポリシーに同意します。</span>
+            </label>
+
+            <button class="primary-button" type="submit">登録する</button>
+          </form>
+
+          <p class="form-switch">
+            すでにアカウントをお持ちの方は <a href="login.php">ログイン</a>
+          </p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
