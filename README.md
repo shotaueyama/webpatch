@@ -83,6 +83,14 @@ WebPatch は、HTML プレビュー、要素単位のコメント、ステータ
 - 未設定時や不正な値の場合は日本語を使用
 - 言語設定は `webpatch_ai_user_preferences.app_language` に保存
 
+### Git 連携設定
+
+- アカウント設定で GitHub ユーザー名、Personal Access Token、コミット作成者名、コミットメールアドレスを保存
+- GitHub Personal Access Token は暗号化して保存し、画面には判別用の一部だけを表示
+- サイトごとに GitHub リポジトリ URL とブランチ名を保存
+- アカウント設定、プロジェクト設定の両方から GitHub 接続確認が可能
+- ユーザー単位の Git 設定は `webpatch_git_settings`、プロジェクト単位の Git 設定は `webpatch_project_git_settings` に保存
+
 ## 基本的な利用フロー
 
 1. ユーザー登録、ログイン
@@ -199,6 +207,8 @@ mysql -u webpatch_user -p webpatch < webpatch_app/schema.sql
 
 表示言語設定では `webpatch_ai_user_preferences` テーブルの `app_language` カラムを使用します。既存環境では、アプリ実行時に不足カラムが自動追加されます。
 
+Git 連携では、プロジェクトごとのリポジトリ URL とブランチ名を `webpatch_project_git_settings` に保存します。このテーブルは `schema.sql` に含まれています。ユーザーごとの GitHub トークン、Git ユーザー名、コミット作成者情報は `webpatch_git_settings` に保存され、このテーブルはアプリ実行時に自動作成されます。
+
 ### 5. ストレージディレクトリを作成
 
 `storage_root` に指定したディレクトリを作成し、Web サーバー実行ユーザーが読み書きできるようにします。
@@ -288,7 +298,7 @@ AI 確認機能は、コメント内容と現在の HTML を照合して反映�
 - `comment-sheet.php`: コメントのシート表示
 - `sheet-api.php`: コメントシート外部 API
 - `ai-check-comments.php`: AI によるコメント反映確認
-- `account.php`: アカウント、表示言語、AI API 設定
+- `account.php`: アカウント、表示言語、AI API、Git 連携設定
 - `notes.php`, `note.php`: ノート一覧、ノート詳細
 - `webpatch_app/bootstrap.php`: 共通ロジック
 - `webpatch_app/layout.php`: 共通レイアウト
@@ -399,6 +409,14 @@ WebPatch brings HTML preview, element-level comments, status management, public 
 - Apply the language to core UI areas such as the shared header, account settings, dashboard, and notes list
 - Fall back to Japanese when no language is set or an invalid value is found
 - Store the setting in `webpatch_ai_user_preferences.app_language`
+
+#### Git Integration Settings
+
+- Save a GitHub username, Personal Access Token, commit author name, and commit author email from the account settings screen
+- Encrypt the GitHub Personal Access Token before storage and show only a short hint on screen
+- Save a GitHub repository URL and branch name per site
+- Test the GitHub connection from both account settings and project settings
+- Store user-level Git settings in `webpatch_git_settings` and project-level Git settings in `webpatch_project_git_settings`
 
 ### Basic Workflow
 
@@ -516,6 +534,8 @@ Some additional tables and columns are created automatically at runtime.
 
 The display language setting uses the `app_language` column on the `webpatch_ai_user_preferences` table. Existing installations add the missing column automatically at runtime.
 
+Git integration stores the per-project repository URL and branch name in `webpatch_project_git_settings`, which is included in `schema.sql`. User-level GitHub tokens, Git usernames, and commit author details are stored in `webpatch_git_settings`, which is created automatically at runtime.
+
 #### 5. Create the Storage Directory
 
 Create the directory configured as `storage_root` and make it writable by the web server user.
@@ -605,7 +625,7 @@ The core features, including site registration, comments, sharing, and public re
 - `comment-sheet.php`: Sheet-style comment view
 - `sheet-api.php`: External comment sheet API
 - `ai-check-comments.php`: AI-assisted reflection checks
-- `account.php`: Account, display language, and AI API settings
+- `account.php`: Account, display language, AI API, and Git integration settings
 - `notes.php`, `note.php`: Note list and note detail
 - `webpatch_app/bootstrap.php`: Shared application logic
 - `webpatch_app/layout.php`: Shared layout
