@@ -42,20 +42,22 @@ $bodyHtml = render_markdown_document($markdownBody);
       <main class="app-main note-main">
         <section class="note-reader-shell">
           <aside class="note-toc" data-note-toc hidden aria-label="目次"></aside>
-          <div class="note-reader-toolbar">
-            <span>公開ノート</span>
-            <span><?= h($note['original_filename']) ?></span>
-          </div>
-          <article class="note-paper" data-note-paper>
-            <header class="note-article-header">
-              <p class="eyebrow">Public Note</p>
-              <h1 data-note-title><?= h($note['title']) ?></h1>
-              <p><?= h(date('Y/m/d H:i', strtotime((string) $note['updated_at']))) ?></p>
-            </header>
-            <div class="note-article" data-note-article>
-              <?= $bodyHtml ?>
+          <div class="note-reader-content">
+            <div class="note-reader-toolbar">
+              <span>公開ノート</span>
+              <span><?= h($note['original_filename']) ?></span>
             </div>
-          </article>
+            <article class="note-paper" data-note-paper>
+              <header class="note-article-header">
+                <p class="eyebrow">Public Note</p>
+                <h1 data-note-title><?= h($note['title']) ?></h1>
+                <p><?= h(date('Y/m/d H:i', strtotime((string) $note['updated_at']))) ?></p>
+              </header>
+              <div class="note-article" data-note-article>
+                <?= $bodyHtml ?>
+              </div>
+            </article>
+          </div>
         </section>
       </main>
     </div>

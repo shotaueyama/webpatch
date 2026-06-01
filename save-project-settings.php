@@ -39,8 +39,21 @@ try {
     $copyPrompt = (string) ($input['copy_prompt'] ?? '');
     save_project_copy_prompt_for_user((int) $project['id'], (int) $user['id'], $copyPrompt);
 
+    $gitSettings = null;
+    if (array_key_exists('git_repository_url', $input) || array_key_exists('git_branch_name', $input)) {
+        if (!user_owns_project($project, (int) $user['id'])) {
+            throw new RuntimeException('サイト所有者のみGit連携設定を変更できます。');
+        }
+        $gitSettings = save_project_git_settings(
+            (int) $project['id'],
+            (string) ($input['git_repository_url'] ?? ''),
+            (string) ($input['git_branch_name'] ?? 'main')
+        );
+    }
+
     project_settings_response(true, 'コピー設定を保存しました。', [
         'copy_prompt' => trim($copyPrompt),
+        'git_settings' => $gitSettings,
     ]);
 } catch (Throwable $e) {
     project_settings_response(false, $e->getMessage(), [], 400);

@@ -14,6 +14,7 @@ if (!$note) {
 }
 
 $canManageNote = user_owns_note($note, (int) $user['id']);
+$canEditNote = $canManageNote || ($note['access_role'] ?? '') === 'view';
 $sharedUsers = $canManageNote ? shared_users_for_note((int) $note['id']) : [];
 $publicLink = $canManageNote ? public_link_for_note((int) $note['id']) : null;
 $publicLinkUrl = ($publicLink !== null && (int) $publicLink['enabled'] === 1)
@@ -36,7 +37,7 @@ ob_start();
     <div class="note-article" data-note-article>
       <?= $bodyHtml ?>
     </div>
-    <?php if ($canManageNote): ?>
+    <?php if ($canEditNote): ?>
       <form class="note-append-form" action="<?= h(base_url('append-note.php')) ?>" method="post" enctype="multipart/form-data" data-note-append-form>
         <?= csrf_field() ?>
         <input type="hidden" name="note_id" value="<?= h(note_public_ref($note)) ?>">
@@ -118,7 +119,7 @@ ob_start();
     article.addEventListener('input', scheduleToc);
   })();
 </script>
-<?php if ($canManageNote): ?>
+<?php if ($canEditNote): ?>
 <div class="note-delete-modal-backdrop" data-note-delete-modal hidden>
   <div class="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="note-delete-title" aria-describedby="note-delete-message">
     <div class="confirm-modal-header">
@@ -132,6 +133,7 @@ ob_start();
     </div>
   </div>
 </div>
+<?php if ($canManageNote): ?>
 <div class="share-modal-backdrop" data-note-share-modal hidden>
   <div class="share-modal" role="dialog" aria-modal="true" aria-labelledby="note-share-modal-title">
     <div class="share-modal-header">
@@ -185,6 +187,7 @@ ob_start();
     </div>
   </div>
 </div>
+<?php endif; ?>
 <div class="toast" data-action-toast role="status" aria-live="polite" aria-atomic="true"></div>
 <script>
   (() => {
@@ -270,14 +273,38 @@ ob_start();
       if (node.classList && node.classList.contains('note-document-body')) {
         return markdownFromNodes(node.children);
       }
+      if (node.classList && node.classList.contains('note-table-wrap')) {
+        const table = node.querySelector(':scope > table');
+        return table ? markdownForNode(table) : markdownFromNodes(node.children);
+      }
       const tag = node.tagName ? node.tagName.toLowerCase() : '';
       if (tag === 'h1') return '# ' + text(node);
       if (tag === 'h2') return '## ' + text(node);
       if (tag === 'h3') return '### ' + text(node);
       if (tag === 'blockquote') return text(node).split('\n').map((line) => '> ' + line).join('\n');
       if (tag === 'pre') return '```\n' + text(node) + '\n```';
+      if (tag === 'hr') return '---';
       if (tag === 'ul') {
         return Array.from(node.children).filter((child) => child.tagName && child.tagName.toLowerCase() === 'li').map((child) => '- ' + text(child)).join('\n');
+      }
+      if (tag === 'table') {
+        const rows = Array.from(node.querySelectorAll('tr')).map((row) => Array.from(row.children).filter((cell) => {
+          const cellTag = cell.tagName ? cell.tagName.toLowerCase() : '';
+          return cellTag === 'th' || cellTag === 'td';
+        }).map((cell) => text(cell).replace(/\|/g, '\\|')));
+        if (rows.length === 0 || rows[0].length === 0) return '';
+        const columnCount = rows[0].length;
+        const normalizeRow = (row) => {
+          const next = row.slice(0, columnCount);
+          while (next.length < columnCount) next.push('');
+          return next;
+        };
+        const separator = Array.from({ length: columnCount }, () => '---');
+        return [
+          '| ' + normalizeRow(rows[0]).join(' | ') + ' |',
+          '| ' + separator.join(' | ') + ' |',
+          ...rows.slice(1).map((row) => '| ' + normalizeRow(row).join(' | ') + ' |')
+        ].join('\n');
       }
       if (tag === 'section' || tag === 'div') return markdownFromNodes(node.children);
       return text(node);
@@ -438,7 +465,31 @@ ob_start();
       const header = document.querySelector('.app-header');
       const headerHeight = header ? header.getBoundingClientRect().height : 64;
       const targetTop = headerHeight + 18;
-      Array.from(article ? article.querySelectorAll(':scope > .note-document') : []).forEach((documentBlock) => {
+      const documents = Array.from(article ? article.querySelectorAll(':scope > .note-document') : []);
+      const isCompact = window.matchMedia('(max-width: 860px)').matches;
+      document.documentElement.style.setProperty('--note-fixed-toolbar-top', `${Math.round(headerHeight + 12)}px`);
+      if (isCompact) {
+        const anchorY = headerHeight + 88;
+        let activeDocument = documents[0] || null;
+        let bestDistance = Number.POSITIVE_INFINITY;
+        documents.forEach((documentBlock) => {
+          const rect = documentBlock.getBoundingClientRect();
+          const containsAnchor = rect.top <= anchorY && rect.bottom >= anchorY;
+          const distance = containsAnchor ? 0 : Math.abs(rect.top - anchorY);
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            activeDocument = documentBlock;
+          }
+        });
+        documents.forEach((documentBlock) => {
+          documentBlock.classList.toggle('toolbar-active', documentBlock === activeDocument);
+          const toolbar = documentBlock.querySelector(':scope > .note-document-toolbar');
+          if (toolbar) toolbar.style.removeProperty('--note-toolbar-top');
+        });
+        return;
+      }
+      documents.forEach((documentBlock) => {
+        documentBlock.classList.remove('toolbar-active');
         const toolbar = documentBlock.querySelector(':scope > .note-document-toolbar');
         if (!toolbar) return;
         const rect = documentBlock.getBoundingClientRect();
@@ -667,7 +718,7 @@ $shareControl = $canManageNote ? '
     <span>共有</span>
   </button>
 ' : '';
-$editControls = $canManageNote ? '
+$editControls = $canEditNote ? '
   <button class="mode-toggle" type="button" data-note-edit-toggle aria-pressed="false">
     <span class="mode-label">文字編集</span>
   </button>

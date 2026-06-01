@@ -1214,6 +1214,212 @@ function save_ai_setting(int $userId, string $provider, string $model, string $a
     $stmt->execute([$userId, $provider, $cipher, $hint, $model]);
 }
 
+function normalize_git_provider(string $provider): string
+{
+    $provider = strtolower(trim($provider));
+    return in_array($provider, ['github', 'git'], true) ? $provider : 'github';
+}
+
+function normalize_git_repo_url(string $repoUrl): string
+{
+    $repoUrl = trim($repoUrl);
+    if ($repoUrl === '') {
+        return '';
+    }
+    if (strlen($repoUrl) > 500) {
+        throw new RuntimeException('GitリポジトリURLが長すぎます。');
+    }
+    if (!preg_match('/^(https:\/\/|git@)[^\s]+$/i', $repoUrl)) {
+        throw new RuntimeException('GitリポジトリURLは https:// または git@ で始まる形式で入力してください。');
+    }
+    return $repoUrl;
+}
+
+function normalize_git_branch(string $branch): string
+{
+    $branch = trim($branch);
+    if ($branch === '') {
+        return 'main';
+    }
+    if (strlen($branch) > 120 || preg_match('/[\s~^:?*\[\\\\]/', $branch) || str_contains($branch, '..') || str_starts_with($branch, '/') || str_ends_with($branch, '/') || str_ends_with($branch, '.')) {
+        throw new RuntimeException('Gitブランチ名が不正です。');
+    }
+    return $branch;
+}
+
+function ensure_git_settings_table(): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+
+    db()->exec(
+        'CREATE TABLE IF NOT EXISTS ' . table_name('git_settings') . ' (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            user_id INT UNSIGNED NOT NULL,
+            provider VARCHAR(32) NOT NULL DEFAULT \'github\',
+            repository_url VARCHAR(500) NOT NULL DEFAULT \'\',
+            branch_name VARCHAR(120) NOT NULL DEFAULT \'main\',
+            username VARCHAR(190) NOT NULL DEFAULT \'\',
+            access_token_cipher TEXT NULL,
+            access_token_hint VARCHAR(32) NOT NULL DEFAULT \'\',
+            author_name VARCHAR(190) NOT NULL DEFAULT \'\',
+            author_email VARCHAR(190) NOT NULL DEFAULT \'\',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_user_git_provider (user_id, provider),
+            KEY idx_user_id (user_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+    );
+    $done = true;
+}
+
+function git_settings_for_user(int $userId): array
+{
+    ensure_git_settings_table();
+    $defaults = [
+        'provider' => 'github',
+        'repository_url' => '',
+        'branch_name' => 'main',
+        'username' => '',
+        'access_token_hint' => '',
+        'has_access_token' => false,
+        'author_name' => '',
+        'author_email' => '',
+    ];
+    $stmt = db()->prepare('SELECT provider, repository_url, branch_name, username, access_token_cipher, access_token_hint, author_name, author_email FROM ' . table_name('git_settings') . ' WHERE user_id = ? AND provider = ? LIMIT 1');
+    $stmt->execute([$userId, 'github']);
+    $row = $stmt->fetch();
+    if (!$row) {
+        return $defaults;
+    }
+    return [
+        'provider' => normalize_git_provider((string) $row['provider']),
+        'repository_url' => (string) $row['repository_url'],
+        'branch_name' => (string) $row['branch_name'],
+        'username' => (string) $row['username'],
+        'access_token_hint' => (string) $row['access_token_hint'],
+        'has_access_token' => (string) ($row['access_token_cipher'] ?? '') !== '',
+        'author_name' => (string) $row['author_name'],
+        'author_email' => (string) $row['author_email'],
+    ];
+}
+
+function git_access_token_for_user(int $userId, string $provider = 'github'): string
+{
+    ensure_git_settings_table();
+    $provider = normalize_git_provider($provider);
+    $stmt = db()->prepare('SELECT access_token_cipher FROM ' . table_name('git_settings') . ' WHERE user_id = ? AND provider = ? LIMIT 1');
+    $stmt->execute([$userId, $provider]);
+    $row = $stmt->fetch();
+    return $row ? decrypt_ai_api_key($row['access_token_cipher'] ?? null) : '';
+}
+
+function save_git_setting(int $userId, array $input): void
+{
+    ensure_git_settings_table();
+    $provider = normalize_git_provider((string) ($input['provider'] ?? 'github'));
+    $repositoryUrl = normalize_git_repo_url((string) ($input['repository_url'] ?? ''));
+    $branchName = normalize_git_branch((string) ($input['branch_name'] ?? 'main'));
+    $username = trim((string) ($input['username'] ?? ''));
+    $authorName = trim((string) ($input['author_name'] ?? ''));
+    $authorEmail = trim((string) ($input['author_email'] ?? ''));
+    $accessToken = trim((string) ($input['access_token'] ?? ''));
+    $clearToken = !empty($input['clear_access_token']);
+
+    if ($username !== '' && mb_strlen($username) > 190) {
+        throw new RuntimeException('Gitユーザー名が長すぎます。');
+    }
+    if ($authorName !== '' && mb_strlen($authorName) > 190) {
+        throw new RuntimeException('Gitコミット名が長すぎます。');
+    }
+    if ($authorEmail !== '' && (!filter_var($authorEmail, FILTER_VALIDATE_EMAIL) || mb_strlen($authorEmail) > 190)) {
+        throw new RuntimeException('Gitコミットメールアドレスが不正です。');
+    }
+
+    $existing = db()->prepare('SELECT access_token_cipher, access_token_hint FROM ' . table_name('git_settings') . ' WHERE user_id = ? AND provider = ? LIMIT 1');
+    $existing->execute([$userId, $provider]);
+    $row = $existing->fetch() ?: null;
+
+    $cipher = $row['access_token_cipher'] ?? null;
+    $hint = (string) ($row['access_token_hint'] ?? '');
+    if ($clearToken) {
+        $cipher = null;
+        $hint = '';
+    } elseif ($accessToken !== '') {
+        $cipher = encrypt_ai_api_key($accessToken);
+        $hint = ai_key_hint($accessToken);
+    }
+
+    $stmt = db()->prepare(
+        'INSERT INTO ' . table_name('git_settings') . ' (user_id, provider, repository_url, branch_name, username, access_token_cipher, access_token_hint, author_name, author_email)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE repository_url = VALUES(repository_url), branch_name = VALUES(branch_name), username = VALUES(username), access_token_cipher = VALUES(access_token_cipher), access_token_hint = VALUES(access_token_hint), author_name = VALUES(author_name), author_email = VALUES(author_email)'
+    );
+    $stmt->execute([$userId, $provider, $repositoryUrl, $branchName, $username, $cipher, $hint, $authorName, $authorEmail]);
+}
+
+function ensure_project_git_settings_table(): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+
+    db()->exec(
+        'CREATE TABLE IF NOT EXISTS ' . table_name('project_git_settings') . ' (
+            id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            project_id BIGINT UNSIGNED NOT NULL,
+            repository_url VARCHAR(500) NOT NULL DEFAULT \'\',
+            branch_name VARCHAR(120) NOT NULL DEFAULT \'main\',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_project_id (project_id),
+            KEY idx_project_id (project_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+    );
+    $done = true;
+}
+
+function project_git_settings(array $project): array
+{
+    ensure_project_git_settings_table();
+    $defaults = [
+        'repository_url' => '',
+        'branch_name' => 'main',
+    ];
+    $stmt = db()->prepare('SELECT repository_url, branch_name FROM ' . table_name('project_git_settings') . ' WHERE project_id = ? LIMIT 1');
+    $stmt->execute([(int) $project['id']]);
+    $row = $stmt->fetch();
+    if (!$row) {
+        return $defaults;
+    }
+    return [
+        'repository_url' => (string) $row['repository_url'],
+        'branch_name' => (string) $row['branch_name'],
+    ];
+}
+
+function save_project_git_settings(int $projectId, string $repositoryUrl, string $branchName): array
+{
+    ensure_project_git_settings_table();
+    $repositoryUrl = normalize_git_repo_url($repositoryUrl);
+    $branchName = normalize_git_branch($branchName);
+
+    $stmt = db()->prepare(
+        'INSERT INTO ' . table_name('project_git_settings') . ' (project_id, repository_url, branch_name)
+         VALUES (?, ?, ?)
+         ON DUPLICATE KEY UPDATE repository_url = VALUES(repository_url), branch_name = VALUES(branch_name)'
+    );
+    $stmt->execute([$projectId, $repositoryUrl, $branchName]);
+
+    return [
+        'repository_url' => $repositoryUrl,
+        'branch_name' => $branchName,
+    ];
+}
+
 function ensure_ai_user_preferences_table(): void
 {
     static $done = false;
@@ -1424,6 +1630,30 @@ function ensure_comment_viewport_column(): void
         }
     }
 
+    $done = true;
+}
+
+function ensure_comment_thread_reads_table(): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+
+    db()->exec(
+        'CREATE TABLE IF NOT EXISTS ' . table_name('comment_thread_reads') . ' (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            project_id BIGINT UNSIGNED NOT NULL,
+            thread_id BIGINT UNSIGNED NOT NULL,
+            user_id BIGINT UNSIGNED NOT NULL,
+            last_read_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_thread_user (thread_id, user_id),
+            KEY idx_project_user (project_id, user_id),
+            KEY idx_thread_id (thread_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+    );
     $done = true;
 }
 
@@ -1852,7 +2082,9 @@ function delete_project(array $project): void
 
     ensure_comment_sheet_api_tokens_table();
     ensure_project_user_settings_table();
+    ensure_project_git_settings_table();
     ensure_ai_check_jobs_table();
+    ensure_comment_thread_reads_table();
 
     $stmt = db()->prepare('SELECT id FROM ' . table_name('comments') . ' WHERE project_id = ?');
     $stmt->execute([$projectId]);
@@ -1868,7 +2100,9 @@ function delete_project(array $project): void
         $tables = [
             'comment_sheet_api_tokens',
             'project_user_settings',
+            'project_git_settings',
             'ai_check_jobs',
+            'comment_thread_reads',
             'comments',
             'project_public_links',
             'project_invites',
@@ -2834,6 +3068,77 @@ function markdown_inline_to_html(string $text): string
     return $html;
 }
 
+function markdown_table_cells(string $line): array
+{
+    $line = trim($line);
+    if ($line === '' || !str_contains($line, '|')) {
+        return [];
+    }
+    if (str_starts_with($line, '|')) {
+        $line = substr($line, 1);
+    }
+    if (str_ends_with($line, '|')) {
+        $line = substr($line, 0, -1);
+    }
+    $parts = preg_split('/(?<!\\\\)\|/u', $line) ?: [];
+    $cells = array_map(static function (string $cell): string {
+        return trim(str_replace('\\|', '|', $cell));
+    }, $parts);
+    return count($cells) >= 2 ? $cells : [];
+}
+
+function markdown_table_alignments(string $line, int $cellCount): ?array
+{
+    $cells = markdown_table_cells($line);
+    if (count($cells) < $cellCount) {
+        return null;
+    }
+    $alignments = [];
+    for ($i = 0; $i < $cellCount; $i++) {
+        $cell = preg_replace('/\s+/u', '', $cells[$i]) ?? '';
+        if (!preg_match('/^:?-{3,}:?$/u', $cell)) {
+            return null;
+        }
+        $alignments[] = str_starts_with($cell, ':') && str_ends_with($cell, ':')
+            ? 'center'
+            : (str_ends_with($cell, ':') ? 'right' : (str_starts_with($cell, ':') ? 'left' : ''));
+    }
+    return $alignments;
+}
+
+function normalize_markdown_table_row(array $cells, int $cellCount): array
+{
+    $cells = array_slice($cells, 0, $cellCount);
+    while (count($cells) < $cellCount) {
+        $cells[] = '';
+    }
+    return $cells;
+}
+
+function render_markdown_table(array $headerCells, array $alignments, array $bodyRows): string
+{
+    $cellCount = count($headerCells);
+    $renderCell = static function (string $tag, string $value, string $alignment = ''): string {
+        $align = $alignment !== '' ? ' style="text-align: ' . h($alignment) . ';"' : '';
+        return '<' . $tag . $align . '>' . markdown_inline_to_html($value) . '</' . $tag . '>';
+    };
+
+    $html = ['<div class="note-table-wrap"><table><thead><tr>'];
+    foreach (normalize_markdown_table_row($headerCells, $cellCount) as $index => $cell) {
+        $html[] = $renderCell('th', $cell, $alignments[$index] ?? '');
+    }
+    $html[] = '</tr></thead><tbody>';
+    foreach ($bodyRows as $row) {
+        $html[] = '<tr>';
+        foreach (normalize_markdown_table_row($row, $cellCount) as $index => $cell) {
+            $html[] = $renderCell('td', $cell, $alignments[$index] ?? '');
+        }
+        $html[] = '</tr>';
+    }
+    $html[] = '</tbody></table></div>';
+    return implode('', $html);
+}
+
 function render_markdown_document(string $markdown): string
 {
     $lines = preg_split('/\R/u', str_replace(["\r\n", "\r"], "\n", $markdown)) ?: [];
@@ -2857,7 +3162,9 @@ function render_markdown_document(string $markdown): string
         }
     };
 
-    foreach ($lines as $line) {
+    $lineCount = count($lines);
+    for ($lineIndex = 0; $lineIndex < $lineCount; $lineIndex++) {
+        $line = $lines[$lineIndex];
         $trimmed = trim($line);
         if (str_starts_with($trimmed, '```')) {
             if ($inCode) {
@@ -2879,6 +3186,36 @@ function render_markdown_document(string $markdown): string
             $flushParagraph();
             $closeList();
             continue;
+        }
+        if (preg_match('/^(?:-{3,}|\*{3,}|_{3,})$/u', $trimmed)) {
+            $flushParagraph();
+            $closeList();
+            $html[] = '<hr>';
+            continue;
+        }
+        $tableHeader = markdown_table_cells($trimmed);
+        if ($tableHeader !== [] && $lineIndex + 1 < $lineCount) {
+            $alignments = markdown_table_alignments((string) $lines[$lineIndex + 1], count($tableHeader));
+            if ($alignments !== null) {
+                $flushParagraph();
+                $closeList();
+                $bodyRows = [];
+                $lineIndex += 2;
+                while ($lineIndex < $lineCount) {
+                    $row = markdown_table_cells((string) $lines[$lineIndex]);
+                    if ($row === []) {
+                        $lineIndex--;
+                        break;
+                    }
+                    $bodyRows[] = $row;
+                    $lineIndex++;
+                }
+                if ($lineIndex >= $lineCount) {
+                    $lineIndex = $lineCount - 1;
+                }
+                $html[] = render_markdown_table($tableHeader, $alignments, $bodyRows);
+                continue;
+            }
         }
         if (preg_match('/^(#{1,3})\s+(.+)$/u', $trimmed, $matches)) {
             $flushParagraph();

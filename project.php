@@ -20,6 +20,7 @@ $canRefreshUrl = $isUrlSource && project_role_allows_edit($project, (int) $user[
 $sharedUsers = $canManageProject ? shared_users_for_project((int) $project['id']) : [];
 $publicLink = $canManageProject ? public_link_for_project((int) $project['id']) : null;
 $copyPrompt = project_copy_prompt_for_user((int) $project['id'], (int) $user['id']);
+$projectGitSettings = project_git_settings($project);
 $savedBasicAuth = null;
 if ($isUrlSource) {
     $savedBasicAuth = url_project_saved_basic_auth(url_project_map($project));
@@ -283,6 +284,25 @@ ob_start();
         <textarea id="project_copy_prompt" name="copy_prompt" rows="8" maxlength="5000" data-project-copy-prompt placeholder="例: 上記コメントを踏まえて、該当HTML/CSSの修正案を提示してください。"><?= h($copyPrompt) ?></textarea>
         <p class="field-hint">空欄で保存すると、追加プロンプトは付与されません。</p>
       </div>
+      <?php if ($canManageProject): ?>
+        <div class="project-settings-subsection">
+          <h3 class="project-settings-section-title">Git連携</h3>
+          <p>このサイトに紐づけるGitHubリポジトリとブランチを保存します。GitHubトークンはアカウント設定のものを使用します。</p>
+        </div>
+        <div class="field">
+          <label for="project_git_repository_url">リポジトリURL</label>
+          <input id="project_git_repository_url" name="git_repository_url" type="text" autocomplete="off" data-project-git-repository-url value="<?= h((string) $projectGitSettings['repository_url']) ?>" placeholder="https://github.com/owner/repo">
+        </div>
+        <div class="field">
+          <label for="project_git_branch_name">ブランチ</label>
+          <input id="project_git_branch_name" name="git_branch_name" type="text" autocomplete="off" data-project-git-branch-name value="<?= h((string) $projectGitSettings['branch_name']) ?>" placeholder="main">
+          <p class="field-hint">サイトごとに保存されます。過去データとの比較やGit反映ではこのブランチを基準にします。</p>
+        </div>
+        <div class="project-settings-inline-actions">
+          <button class="modal-button secondary" type="button" data-project-git-test>GitHub接続確認</button>
+          <span class="project-settings-test-result" data-project-git-test-result role="status" aria-live="polite"></span>
+        </div>
+      <?php endif; ?>
       <div class="modal-actions">
         <button class="modal-button secondary" type="button" data-project-settings-close>キャンセル</button>
         <button class="modal-button primary" type="submit">保存する</button>
@@ -1044,6 +1064,7 @@ ob_start();
       const pageScrollX = window.scrollX;
       const pageScrollY = window.scrollY;
       activeThreadId = thread.id;
+      markThreadRead(thread);
       draftSelector = null;
       editCommentId = null;
       editCommentFile = thread.file_path || activeFile;
@@ -1339,11 +1360,41 @@ ob_start();
       }
     };
 
+    const markThreadRead = async (thread) => {
+      if (!thread || !thread.id) {
+        return;
+      }
+      thread.has_unread_activity = false;
+      renderList();
+      try {
+        const response = await fetch('<?= h(base_url('comments.php')) ?>', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            csrf_token: csrfToken,
+            id: projectId,
+            file: resolveThreadFile(thread) || activeFile,
+            action: 'mark_read',
+            comment_id: thread.id
+          })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) {
+          throw new Error(result.message || '既読状態を更新できませんでした。');
+        }
+      } catch (error) {
+      }
+    };
+
     const activateCommentFromList = async (thread) => {
       if (navigateToThreadPage(thread)) {
         return;
       }
       focusCommentListItem(thread);
+      markThreadRead(thread);
       if (!scrollToThread(thread)) {
         renderList();
       }
@@ -1366,13 +1417,20 @@ ob_start();
         button.classList.toggle('resolved', Boolean(thread.is_resolved));
         button.classList.toggle('confirmation-pending', Boolean(thread.is_confirmation_pending));
         button.classList.toggle('missing-target', currentMissingTarget);
+        button.classList.toggle('unread-activity', Boolean(thread.has_unread_activity));
         button.classList.toggle('active', Number(thread.id) === Number(selectedThreadId));
         button.setAttribute('role', 'button');
         button.tabIndex = 0;
         button.dataset.threadId = thread.id;
         const label = document.createElement('strong');
         label.textContent = `${threadNumberLabel(thread)} ${thread.selector}`;
-        if (thread.is_confirmation_pending) {
+        if (!thread.is_resolved && !thread.is_confirmation_pending) {
+          const newDot = document.createElement('span');
+          newDot.className = 'comment-new-dot';
+          newDot.title = '新しいコメント';
+          newDot.setAttribute('aria-label', '新しいコメント');
+          label.prepend(newDot);
+        } else if (thread.is_confirmation_pending) {
           const pendingDot = document.createElement('span');
           pendingDot.className = 'comment-pending-dot';
           pendingDot.title = '確認待ち';
@@ -2367,6 +2425,10 @@ ob_start();
     const modal = document.querySelector('[data-project-settings-modal]');
     const form = document.querySelector('[data-project-settings-form]');
     const textarea = document.querySelector('[data-project-copy-prompt]');
+    const gitRepositoryUrl = document.querySelector('[data-project-git-repository-url]');
+    const gitBranchName = document.querySelector('[data-project-git-branch-name]');
+    const gitTestButton = document.querySelector('[data-project-git-test]');
+    const gitTestResult = document.querySelector('[data-project-git-test-result]');
     const closeButtons = Array.from(document.querySelectorAll('[data-project-settings-close]'));
     const csrfToken = <?= json_encode(csrf_token(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
     const projectId = <?= json_encode($projectPublicRef, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
@@ -2419,7 +2481,9 @@ ob_start();
           body: JSON.stringify({
             csrf_token: csrfToken,
             project_id: projectId,
-            copy_prompt: textarea.value
+            copy_prompt: textarea.value,
+            git_repository_url: gitRepositoryUrl ? gitRepositoryUrl.value : '',
+            git_branch_name: gitBranchName ? gitBranchName.value : ''
           })
         });
         const result = await response.json();
@@ -2437,6 +2501,43 @@ ob_start();
         }
       }
     });
+
+    if (gitTestButton && gitTestResult) {
+      const setGitTestResult = (message, state = '') => {
+        gitTestResult.textContent = message || '';
+        gitTestResult.dataset.state = state;
+      };
+      gitTestButton.addEventListener('click', async () => {
+        const previousText = gitTestButton.textContent;
+        gitTestButton.disabled = true;
+        gitTestButton.textContent = '確認中';
+        setGitTestResult('GitHub接続を確認しています...', 'pending');
+        try {
+          const response = await fetch('<?= h(base_url('git-test-connection.php')) ?>', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json'
+            },
+            body: JSON.stringify({
+              csrf_token: csrfToken,
+              repository_url: gitRepositoryUrl ? gitRepositoryUrl.value : '',
+              branch_name: gitBranchName ? gitBranchName.value : ''
+            })
+          });
+          const result = await response.json();
+          if (!response.ok || !result.ok) {
+            throw new Error(result.message || 'GitHub接続確認に失敗しました。');
+          }
+          setGitTestResult(`${result.message} ${result.repository || ''} ${result.branch ? `(${result.branch})` : ''}`, 'success');
+        } catch (error) {
+          setGitTestResult(error.message || 'GitHub接続確認に失敗しました。', 'error');
+        } finally {
+          gitTestButton.disabled = false;
+          gitTestButton.textContent = previousText || 'GitHub接続確認';
+        }
+      });
+    }
   })();
 
   <?php if ($canManageProject): ?>

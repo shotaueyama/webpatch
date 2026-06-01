@@ -916,7 +916,13 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
             button.dataset.threadId = thread.id;
             const label = document.createElement('strong');
             label.textContent = `${threadNumberLabel(thread)} ${thread.selector}`;
-            if (thread.is_confirmation_pending) {
+            if (!thread.is_resolved && !thread.is_confirmation_pending) {
+              const newDot = document.createElement('span');
+              newDot.className = 'comment-new-dot';
+              newDot.title = '新しいコメント';
+              newDot.setAttribute('aria-label', '新しいコメント');
+              label.prepend(newDot);
+            } else if (thread.is_confirmation_pending) {
               const pendingDot = document.createElement('span');
               pendingDot.className = 'comment-pending-dot';
               pendingDot.title = '確認待ち';

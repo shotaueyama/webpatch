@@ -36,7 +36,7 @@ try {
     }
 
     $note = find_note_for_user_ref($noteRef, (int) $user['id']);
-    if ($note === null || !user_owns_note($note, (int) $user['id'])) {
+    if ($note === null) {
         http_response_code(403);
         echo json_encode(['ok' => false, 'message' => 'このノートは編集できません。']);
         exit;
@@ -45,9 +45,9 @@ try {
     $stmt = db()->prepare(
         'UPDATE ' . table_name('notes') . '
             SET title = ?, markdown = ?, updated_at = NOW()
-          WHERE id = ? AND user_id = ?'
+          WHERE id = ?'
     );
-    $stmt->execute([$title, $markdown, (int) $note['id'], (int) $user['id']]);
+    $stmt->execute([$title, $markdown, (int) $note['id']]);
 
     echo json_encode(['ok' => true, 'message' => '保存しました。']);
 } catch (Throwable $e) {

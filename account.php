@@ -11,6 +11,7 @@ $aiProviders = ai_provider_definitions();
 $aiSettings = ai_settings_for_user((int) $user['id']);
 $aiCheckProvider = ai_check_provider_for_user((int) $user['id']);
 $appLanguage = app_language_for_user((int) $user['id']);
+$gitSettings = git_settings_for_user((int) $user['id']);
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
@@ -87,6 +88,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect_to('account.php');
         }
 
+        if ($action === 'git_settings') {
+            save_git_setting((int) $user['id'], [
+                'provider' => 'github',
+                'repository_url' => '',
+                'branch_name' => 'main',
+                'username' => (string) ($_POST['git_username'] ?? ''),
+                'access_token' => (string) ($_POST['git_access_token'] ?? ''),
+                'clear_access_token' => isset($_POST['git_clear_access_token']),
+                'author_name' => (string) ($_POST['git_author_name'] ?? ''),
+                'author_email' => (string) ($_POST['git_author_email'] ?? ''),
+            ]);
+            set_flash('success', $appLanguage === 'en' ? 'Git integration settings saved.' : 'Git連携設定を保存しました。');
+            redirect_to('account.php');
+        }
+
         if ($action === 'logout') {
             redirect_to('logout.php');
         }
@@ -143,6 +159,25 @@ $accountText = [
         'test_connection' => '接続確認',
         'api_key_help' => 'APIキーは暗号化して保存し、画面には判別用の一部だけを表示します。',
         'ai_save' => 'AI設定を保存',
+        'git_title' => 'Git連携',
+        'git_desc' => 'GitHub接続に使うユーザー情報とアクセストークンを保存します',
+        'git_username' => 'Gitユーザー名',
+        'git_username_placeholder' => 'GitHubユーザー名',
+        'git_token' => 'アクセストークン',
+        'git_token_saved' => 'アクセストークン保存済み',
+        'git_token_missing' => 'アクセストークン未設定',
+        'git_token_change_placeholder' => '変更する場合のみ入力',
+        'git_token_input_placeholder' => 'GitHub Personal Access Token',
+        'git_clear_token' => '保存済みトークンを削除する',
+        'git_author_name' => 'コミット名',
+        'git_author_email' => 'コミットメール',
+        'git_test_connection' => '接続確認',
+        'git_save' => 'Git設定を保存',
+        'git_help' => 'トークンは暗号化して保存します。リポジトリURLとブランチは各サイトの設定で保存します。',
+        'git_checking' => '確認中',
+        'git_checking_connection' => 'GitHub接続を確認しています...',
+        'git_json_error' => 'Git接続確認APIがJSON以外のレスポンスを返しました。ページを再読み込みしてから再度お試しください。',
+        'git_connection_failed' => 'Git接続確認に失敗しました。',
         'logout_title' => 'ログアウト',
         'logout_desc' => 'この端末のWebPatchセッションを終了します',
         'logout_button' => 'ログアウト',
@@ -196,6 +231,25 @@ $accountText = [
         'test_connection' => 'Test connection',
         'api_key_help' => 'API keys are encrypted before storage. Only a short hint is shown on screen.',
         'ai_save' => 'Save AI settings',
+        'git_title' => 'Git Integration',
+        'git_desc' => 'Save the GitHub user details and access token used for Git connections',
+        'git_username' => 'Git username',
+        'git_username_placeholder' => 'GitHub username',
+        'git_token' => 'Access token',
+        'git_token_saved' => 'Access token saved',
+        'git_token_missing' => 'Access token missing',
+        'git_token_change_placeholder' => 'Enter only to change the saved token',
+        'git_token_input_placeholder' => 'GitHub Personal Access Token',
+        'git_clear_token' => 'Remove saved token',
+        'git_author_name' => 'Commit name',
+        'git_author_email' => 'Commit email',
+        'git_test_connection' => 'Test connection',
+        'git_save' => 'Save Git settings',
+        'git_help' => 'Tokens are encrypted before storage. Repository URLs and branches are saved per site.',
+        'git_checking' => 'Checking',
+        'git_checking_connection' => 'Checking GitHub connection...',
+        'git_json_error' => 'The Git connection test API returned a non-JSON response. Reload the page and try again.',
+        'git_connection_failed' => 'Git connection test failed.',
         'logout_title' => 'Log Out',
         'logout_desc' => 'End the current WebPatch session on this device',
         'logout_button' => 'Log out',
@@ -396,6 +450,63 @@ ob_start();
     </form>
   </section>
 
+  <section class="account-section">
+    <div class="account-section-header">
+      <div class="account-section-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 9v6a3 3 0 0 0 3 3h6"/><path d="M6 9v1a3 3 0 0 0 3 3h2"/></svg>
+      </div>
+      <div>
+        <h2><?= h($accountText['git_title']) ?></h2>
+        <p class="account-section-desc"><?= h($accountText['git_desc']) ?></p>
+      </div>
+    </div>
+    <form class="settings-form" action="<?= h(base_url('account.php')) ?>" method="post" data-git-settings-form>
+      <?= csrf_field() ?>
+      <input type="hidden" name="action" value="git_settings">
+      <section class="ai-provider-card" data-git-provider-card>
+        <div class="ai-provider-header">
+          <div>
+            <h3>GitHub</h3>
+            <p><?= ((bool) $gitSettings['has_access_token']) ? h($accountText['git_token_saved']) : h($accountText['git_token_missing']) ?></p>
+          </div>
+          <?php if ((bool) $gitSettings['has_access_token']): ?>
+            <span class="ai-provider-status"><?= h((string) $gitSettings['access_token_hint']) ?></span>
+          <?php endif; ?>
+        </div>
+        <div class="field">
+          <label for="git_username"><?= h($accountText['git_username']) ?></label>
+          <input id="git_username" name="git_username" type="text" autocomplete="username" value="<?= h((string) $gitSettings['username']) ?>" placeholder="<?= h($accountText['git_username_placeholder']) ?>">
+        </div>
+        <div class="field">
+          <label for="git_access_token"><?= h($accountText['git_token']) ?></label>
+          <input id="git_access_token" name="git_access_token" type="password" autocomplete="off" placeholder="<?= ((bool) $gitSettings['has_access_token']) ? h($accountText['git_token_change_placeholder']) : h($accountText['git_token_input_placeholder']) ?>">
+        </div>
+        <label class="ai-clear-field">
+          <input type="checkbox" name="git_clear_access_token" value="1">
+          <span><?= h($accountText['git_clear_token']) ?></span>
+        </label>
+        <div class="ai-provider-fields">
+          <div class="field">
+            <label for="git_author_name"><?= h($accountText['git_author_name']) ?></label>
+            <input id="git_author_name" name="git_author_name" type="text" autocomplete="name" value="<?= h((string) $gitSettings['author_name']) ?>" placeholder="<?= h($profileName) ?>">
+          </div>
+          <div class="field">
+            <label for="git_author_email"><?= h($accountText['git_author_email']) ?></label>
+            <input id="git_author_email" name="git_author_email" type="email" autocomplete="email" value="<?= h((string) $gitSettings['author_email']) ?>" placeholder="<?= h($profileEmail) ?>">
+          </div>
+        </div>
+        <div class="ai-provider-actions">
+          <button class="secondary-button ai-test-button" type="button" data-git-test-button><?= h($accountText['git_test_connection']) ?></button>
+          <div class="ai-test-result" data-git-test-result role="status" aria-live="polite"></div>
+        </div>
+      </section>
+      <p class="help-text"><?= h($accountText['git_help']) ?></p>
+      <div class="account-form-actions">
+        <button class="primary-button" type="submit"><?= h($accountText['git_save']) ?></button>
+      </div>
+    </form>
+  </section>
+
   <section class="account-section account-section-subtle">
     <div class="account-logout-row">
       <div class="account-section-header">
@@ -473,6 +584,57 @@ ob_start();
           button.textContent = previousText || copy.testConnection;
         }
       });
+    });
+  })();
+  (() => {
+    const csrfToken = <?= json_encode(csrf_token(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+    const endpoint = <?= json_encode(base_url('git-test-connection.php'), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+    const copy = <?= json_encode([
+        'checking' => $accountText['git_checking'],
+        'checkingConnection' => $accountText['git_checking_connection'],
+        'jsonError' => $accountText['git_json_error'],
+        'connectionFailed' => $accountText['git_connection_failed'],
+        'testConnection' => $accountText['git_test_connection'],
+    ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+    const button = document.querySelector('[data-git-test-button]');
+    const resultBox = document.querySelector('[data-git-test-result]');
+    const setResult = (message, state = '') => {
+      if (!resultBox) return;
+      resultBox.textContent = message || '';
+      resultBox.dataset.state = state;
+    };
+    if (!button) return;
+    button.addEventListener('click', async () => {
+      const previousText = button.textContent;
+      button.disabled = true;
+      button.textContent = copy.checking;
+      setResult(copy.checkingConnection, 'pending');
+      try {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({
+            csrf_token: csrfToken,
+            access_token: document.getElementById('git_access_token')?.value || ''
+          })
+        });
+        const responseText = await response.text();
+        let result;
+        try {
+          result = JSON.parse(responseText);
+        } catch (error) {
+          throw new Error(copy.jsonError);
+        }
+        if (!response.ok || !result.ok) {
+          throw new Error(result.message || copy.connectionFailed);
+        }
+        setResult(`${result.message} ${result.repository || ''} (${result.branch || ''})`, 'success');
+      } catch (error) {
+        setResult(error.message || copy.connectionFailed, 'error');
+      } finally {
+        button.disabled = false;
+        button.textContent = previousText || copy.testConnection;
+      }
     });
   })();
 </script>

@@ -15,13 +15,14 @@ function sheet_api_response(array $payload, int $status = 200): never
 
 function sheet_api_status(string $status): string
 {
-    return in_array($status, ['todo', 'doing', 'done'], true) ? $status : 'todo';
+    return in_array($status, ['todo', 'doing', 'pending', 'done'], true) ? $status : 'todo';
 }
 
 function sheet_api_status_label(string $status): string
 {
     return match (sheet_api_status($status)) {
         'doing' => '対応中',
+        'pending' => '確認待ち',
         'done' => '解決済み',
         default => '未着手',
     };
@@ -50,9 +51,10 @@ function sheet_api_token_from_request(): string
 
 function sheet_api_comment_rows(int $projectId): array
 {
+    ensure_comment_confirmation_columns();
     ensure_comment_ai_check_columns();
     $stmt = db()->prepare(
-        'SELECT c.id, c.file_path, c.selector, c.body, c.sheet_status, c.desired_due_at, c.ai_check_status, c.ai_check_summary, c.ai_checked_at, c.ai_check_provider, c.ai_check_model, c.resolved_at, c.created_at, u.name AS user_name
+        'SELECT c.id, c.file_path, c.selector, c.body, c.sheet_status, c.desired_due_at, c.ai_check_status, c.ai_check_summary, c.ai_checked_at, c.ai_check_provider, c.ai_check_model, c.resolved_at, c.confirmation_pending_at, c.created_at, u.name AS user_name
            FROM ' . table_name('comments') . ' c
            LEFT JOIN ' . table_name('users') . ' u ON u.id = c.user_id
           WHERE c.project_id = ? AND c.parent_id IS NULL
@@ -62,7 +64,7 @@ function sheet_api_comment_rows(int $projectId): array
 
     $comments = [];
     foreach ($stmt->fetchAll() as $row) {
-        $status = $row['resolved_at'] !== null ? 'done' : sheet_api_status((string) ($row['sheet_status'] ?? 'todo'));
+        $status = $row['resolved_at'] !== null ? 'done' : ($row['confirmation_pending_at'] !== null ? 'pending' : sheet_api_status((string) ($row['sheet_status'] ?? 'todo')));
         $filePath = (string) $row['file_path'];
         $selector = (string) ($row['selector'] ?? '');
         $comments[] = [
@@ -83,6 +85,8 @@ function sheet_api_comment_rows(int $projectId): array
             'ai_check_model' => $row['ai_check_model'] ?? '',
             'is_resolved' => $row['resolved_at'] !== null,
             'resolved_at' => $row['resolved_at'],
+            'is_confirmation_pending' => $row['confirmation_pending_at'] !== null,
+            'confirmation_pending_at' => $row['confirmation_pending_at'],
             'created_at' => $row['created_at'],
             'user_name' => $row['user_name'] ?: 'ゲスト',
         ];
@@ -109,6 +113,7 @@ function sheet_api_files(array $project): array
 
 function sheet_api_update_comment(int $projectId, array $update): void
 {
+    ensure_comment_confirmation_columns();
     ensure_comment_ai_check_columns();
     $commentId = (int) ($update['comment_id'] ?? $update['id'] ?? 0);
     if ($commentId <= 0) {
@@ -123,8 +128,13 @@ function sheet_api_update_comment(int $projectId, array $update): void
         $params[] = $status;
         if ($status === 'done') {
             $sets[] = 'resolved_at = COALESCE(resolved_at, NOW())';
+            $sets[] = 'confirmation_pending_at = NULL';
+        } elseif ($status === 'pending') {
+            $sets[] = 'resolved_at = NULL';
+            $sets[] = 'confirmation_pending_at = COALESCE(confirmation_pending_at, NOW())';
         } else {
             $sets[] = 'resolved_at = NULL';
+            $sets[] = 'confirmation_pending_at = NULL';
         }
     }
     if (array_key_exists('desired_due_at', $update)) {

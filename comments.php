@@ -131,6 +131,7 @@ function comments_payload(int $projectId, ?string $file, int $userId, int $owner
 {
     ensure_comment_confirmation_columns();
     ensure_comment_viewport_column();
+    ensure_comment_thread_reads_table();
     $where = 'WHERE c.project_id = ?';
     $params = [$projectId];
     if ($file !== null) {
@@ -182,7 +183,61 @@ function comments_payload(int $projectId, ?string $file, int $userId, int $owner
         }
     }
 
+    if ($threads !== []) {
+        $threadIds = array_keys($threads);
+        $placeholders = implode(',', array_fill(0, count($threadIds), '?'));
+        $readStmt = db()->prepare(
+            'SELECT thread_id, last_read_at
+               FROM ' . table_name('comment_thread_reads') . '
+              WHERE project_id = ? AND user_id = ? AND thread_id IN (' . $placeholders . ')'
+        );
+        $readStmt->execute(array_merge([$projectId, $userId], $threadIds));
+        $lastReadByThread = [];
+        foreach ($readStmt->fetchAll() as $readRow) {
+            $lastReadByThread[(int) $readRow['thread_id']] = strtotime((string) $readRow['last_read_at']) ?: 0;
+        }
+
+        foreach ($threads as $threadId => &$thread) {
+            $latestOtherActivity = 0;
+            $comments = array_merge([$thread], $thread['replies']);
+            foreach ($comments as $comment) {
+                if (!empty($comment['is_own'])) {
+                    continue;
+                }
+                $createdAt = strtotime((string) ($comment['created_at'] ?? '')) ?: 0;
+                $latestOtherActivity = max($latestOtherActivity, $createdAt);
+            }
+            $lastReadAt = $lastReadByThread[(int) $threadId] ?? 0;
+            $thread['has_unread_activity'] = $latestOtherActivity > 0 && ($lastReadAt === 0 || $latestOtherActivity > $lastReadAt);
+            $thread['latest_other_activity_at'] = $latestOtherActivity > 0 ? date('Y-m-d H:i:s', $latestOtherActivity) : null;
+            $thread['last_read_at'] = $lastReadAt > 0 ? date('Y-m-d H:i:s', $lastReadAt) : null;
+        }
+        unset($thread);
+    }
+
     return array_values($threads);
+}
+
+function mark_comment_thread_read(int $projectId, int $userId, int $threadId): void
+{
+    ensure_comment_thread_reads_table();
+    $stmt = db()->prepare(
+        'SELECT id
+           FROM ' . table_name('comments') . '
+          WHERE id = ? AND project_id = ? AND parent_id IS NULL
+          LIMIT 1'
+    );
+    $stmt->execute([$threadId, $projectId]);
+    if (!$stmt->fetchColumn()) {
+        throw new RuntimeException('既読にするコメントが見つかりません。');
+    }
+
+    $stmt = db()->prepare(
+        'INSERT INTO ' . table_name('comment_thread_reads') . ' (project_id, thread_id, user_id, last_read_at)
+         VALUES (?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE last_read_at = VALUES(last_read_at)'
+    );
+    $stmt->execute([$projectId, $threadId, $userId]);
 }
 
 try {
@@ -328,6 +383,15 @@ try {
         }
 
         respond_json(['ok' => true, 'focus_id' => $focusId, 'threads' => comments_payload((int) $project['id'], $file, (int) $user['id'], (int) $project['user_id'])]);
+    }
+
+    if ($action === 'mark_read') {
+        $commentId = (int) ($payload['comment_id'] ?? 0);
+        if ($commentId <= 0) {
+            throw new RuntimeException('既読にするコメントが見つかりません。');
+        }
+        mark_comment_thread_read((int) $project['id'], (int) $user['id'], $commentId);
+        respond_json(['ok' => true, 'thread_id' => $commentId]);
     }
 
     if ($action === 'update') {

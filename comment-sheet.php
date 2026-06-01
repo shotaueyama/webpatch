@@ -50,7 +50,7 @@ function sheet_response(array $payload, int $status = 200): never
 
 function normalize_sheet_status(string $status): string
 {
-    return in_array($status, ['todo', 'doing', 'done'], true) ? $status : 'todo';
+    return in_array($status, ['todo', 'doing', 'pending', 'done'], true) ? $status : 'todo';
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -76,8 +76,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $params[] = $status;
             if ($status === 'done') {
                 $updates[] = 'resolved_at = COALESCE(resolved_at, NOW())';
+                $updates[] = 'confirmation_pending_at = NULL';
+            } elseif ($status === 'pending') {
+                $updates[] = 'resolved_at = NULL';
+                $updates[] = 'confirmation_pending_at = COALESCE(confirmation_pending_at, NOW())';
             } else {
                 $updates[] = 'resolved_at = NULL';
+                $updates[] = 'confirmation_pending_at = NULL';
             }
         }
         if (array_key_exists('desired_due_at', $payload)) {
@@ -141,8 +146,9 @@ foreach ($iterator as $file) {
 sort($files);
 $fileCopyTargets = project_file_copy_targets($project, $files);
 
+ensure_comment_confirmation_columns();
 $stmt = db()->prepare(
-    'SELECT c.id, c.file_path, c.selector, c.body, c.sheet_status, c.desired_due_at, c.ai_check_status, c.ai_check_summary, c.ai_checked_at, c.ai_check_provider, c.ai_check_model, c.resolved_at, c.created_at, u.name AS user_name
+    'SELECT c.id, c.file_path, c.selector, c.body, c.sheet_status, c.desired_due_at, c.ai_check_status, c.ai_check_summary, c.ai_checked_at, c.ai_check_provider, c.ai_check_model, c.resolved_at, c.confirmation_pending_at, c.created_at, u.name AS user_name
        FROM ' . table_name('comments') . ' c
        LEFT JOIN ' . table_name('users') . ' u ON u.id = c.user_id
       WHERE c.project_id = ? AND c.parent_id IS NULL
@@ -157,7 +163,7 @@ foreach ($stmt->fetchAll() as $row) {
         'file_path' => $row['file_path'],
         'selector' => $row['selector'] ?? '',
         'body' => $row['body'],
-        'sheet_status' => $row['resolved_at'] !== null ? 'done' : normalize_sheet_status((string) ($row['sheet_status'] ?? 'todo')),
+        'sheet_status' => $row['resolved_at'] !== null ? 'done' : ($row['confirmation_pending_at'] !== null ? 'pending' : normalize_sheet_status((string) ($row['sheet_status'] ?? 'todo'))),
         'desired_due_at' => $row['desired_due_at'],
         'ai_check_status' => normalize_ai_check_status((string) ($row['ai_check_status'] ?? 'unchecked')),
         'ai_check_summary' => $row['ai_check_summary'] ?? '',
@@ -166,6 +172,8 @@ foreach ($stmt->fetchAll() as $row) {
         'ai_check_model' => $row['ai_check_model'] ?? '',
         'is_resolved' => $row['resolved_at'] !== null,
         'resolved_at' => $row['resolved_at'],
+        'is_confirmation_pending' => $row['confirmation_pending_at'] !== null,
+        'confirmation_pending_at' => $row['confirmation_pending_at'],
         'created_at' => $row['created_at'],
         'user_name' => $row['user_name'] ?: 'ゲスト',
     ];
@@ -357,6 +365,7 @@ $sheetData = [
         const statuses = [
           { key: 'todo', label: '未着手', color: '#64748b', bg: '#f1f5f9' },
           { key: 'doing', label: '対応中', color: '#b45309', bg: '#fff7ed' },
+          { key: 'pending', label: '確認待ち', color: '#047857', bg: '#ecfdf5' },
           { key: 'done', label: '解決済み', color: '#047857', bg: '#ecfdf5' }
         ];
         const aiStatuses = [
@@ -383,8 +392,9 @@ $sheetData = [
             commentCountByFile.set(file, (commentCountByFile.get(file) || 0) + 1);
           }
         });
-        const firstCommentFile = sheetData.comments.find((comment) => sheetData.files.includes(comment.file_path || ''));
-        let activeFile = firstCommentFile ? firstCommentFile.file_path : (sheetData.files[0] || '');
+        const tabFiles = Array.from(commentCountByFile.keys()).filter(Boolean);
+        const visibleTabFiles = tabFiles.length > 0 ? tabFiles : sheetData.files;
+        let activeFile = visibleTabFiles[0] || '';
         let scrollY = 0;
         let hitCells = [];
         let toastTimer = null;
@@ -903,7 +913,7 @@ $sheetData = [
         };
         const renderTabs = () => {
           tabs.replaceChildren();
-          sheetData.files.forEach((file) => {
+          visibleTabFiles.forEach((file) => {
             const count = commentCountByFile.get(file) || 0;
             const button = document.createElement('button');
             button.className = 'sheet-tab';
@@ -915,6 +925,8 @@ $sheetData = [
               await commitOpenEditors();
               activeFile = file;
               scrollY = 0;
+              wrap.scrollLeft = 0;
+              hideContextMenu();
               renderTabs();
               draw();
             });

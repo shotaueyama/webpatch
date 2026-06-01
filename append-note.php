@@ -14,7 +14,7 @@ try {
     verify_csrf();
 
     $note = find_note_for_user_ref($noteRef, (int) $user['id']);
-    if ($note === null || !user_owns_note($note, (int) $user['id'])) {
+    if ($note === null) {
         throw new RuntimeException('このノートは編集できません。');
     }
 
@@ -33,9 +33,9 @@ try {
     $stmt = db()->prepare(
         'UPDATE ' . table_name('notes') . '
             SET markdown = ?, updated_at = NOW()
-          WHERE id = ? AND user_id = ?'
+          WHERE id = ?'
     );
-    $stmt->execute([$nextMarkdown, (int) $note['id'], (int) $user['id']]);
+    $stmt->execute([$nextMarkdown, (int) $note['id']]);
 
     set_flash('success', 'Markdownを追加しました。');
 } catch (Throwable $e) {
