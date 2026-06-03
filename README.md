@@ -59,7 +59,11 @@ WebPatch は、HTML プレビュー、要素単位のコメント、ステータ
 - コメントをシート形式で一覧表示
 - ステータス、希望完了日時、AI 確認結果を一覧で確認
 - API トークンを発行して外部ツールからコメント一覧取得、更新
-- `todo`、`doing`、`done` のステータス管理
+- `todo`、`doing`、`pending`、`done` のステータス管理
+- コメントシートのヘッダーから API リファレンス Markdown をダウンロード
+- `status=todo&fields=id,response_prompt` で未着手コメントの対応プロンプトだけ取得
+- 対応プロンプトには添付画像がある場合 `#添付 [URL]` 行を含める
+- Basic 認証と併用しやすい `X-WebPatch-API-Token` ヘッダーに対応
 
 ### AI による反映確認
 
@@ -295,6 +299,7 @@ AI 確認機能は、コメント内容と現在の HTML を照合して反映�
 - `public-project.php`: 公開リンク向けレビュー画面
 - `comments.php`: ログインユーザー向けコメント API
 - `public-comments.php`: ゲスト向けコメント API
+- `comment-image.php`: コメント添付画像の配信
 - `comment-sheet.php`: コメントのシート表示
 - `sheet-api.php`: コメントシート外部 API
 - `ai-check-comments.php`: AI によるコメント反映確認
@@ -313,6 +318,57 @@ AI 確認機能は、コメント内容と現在の HTML を照合して反映�
 - 公開リンクはトークンを知っている人がアクセスできます。不要になったら無効化または再発行してください。
 - アップロード ZIP から PHP や実行系拡張子は除外されますが、Web サーバー側でもストレージ配下を直接実行できない構成にしてください。
 - コメント添付画像や取得 HTML には機密情報が含まれる可能性があります。バックアップ、削除、アクセス権限の運用ルールを決めてください。
+- コメントシート API を Basic 認証環境から使う場合は、WebPatch API トークンを `X-WebPatch-API-Token` ヘッダーで渡してください。`api_token` クエリは URL ログに残りやすいため、通常運用では避けてください。
+
+## コメントシート API
+
+コメントシートごと、つまりサイトプロジェクトごとに API トークンを発行します。同じプロジェクト内の全ページコメントを 1 つの API で取得・更新できます。
+
+```bash
+curl -sS \
+  -H "X-WebPatch-API-Token: <API_TOKEN>" \
+  "https://cognify.works/webpatch/sheet-api"
+```
+
+Basic 認証がある環境では、Basic 認証と WebPatch API トークンを分けて渡します。
+
+```bash
+curl -sS \
+  -u BASIC_ID:BASIC_PASSWORD \
+  -H "X-WebPatch-API-Token: <API_TOKEN>" \
+  "https://cognify.works/webpatch/sheet-api?status=todo&fields=id,response_prompt"
+```
+
+主な GET パラメータ:
+
+- `status`: `todo`、`doing`、`pending`、`done`。カンマ区切りで複数指定できます。
+- `fields`: `id`、`file_path`、`selector`、`body`、`sheet_status`、`status_label`、`desired_due_at`、`attachments`、`attachment_paths`、`response_prompt` などをカンマ区切りで指定できます。
+
+更新は `PATCH` または `POST` で行います。
+
+```bash
+curl -sS -X PATCH \
+  -H "X-WebPatch-API-Token: <API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"comment_id":123,"sheet_status":"doing","desired_due_at":"2026-05-31T18:00"}' \
+  "https://cognify.works/webpatch/sheet-api"
+```
+
+更新可能な項目:
+
+- `sheet_status`: `todo`、`doing`、`pending`、`done`
+- `desired_due_at`: 希望完了日時。空文字でクリア
+- `body`: コメント本文。更新すると AI 確認状態は未確認に戻る
+
+`response_prompt` は次の形式で返ります。添付画像がある場合は `#添付` 行が追加されます。
+
+```text
+#対象 : 対象ページ / selector
+#コメント : コメント本文
+#添付 https://cognify.works/webpatch/comment-image.php?id=...
+```
+
+添付画像 URL を API トークンで取得する場合は、画像リクエストにも `X-WebPatch-API-Token` を付けてください。
 
 ## このツールが向いている場面
 
@@ -385,7 +441,11 @@ WebPatch brings HTML preview, element-level comments, status management, public 
 - Check status, desired due date, and AI check results in one place
 - Issue API tokens for external tools
 - Fetch and update comments through the sheet API
-- Manage `todo`, `doing`, and `done` statuses
+- Manage `todo`, `doing`, `pending`, and `done` statuses
+- Download an API reference Markdown file from the comment sheet header
+- Fetch only response prompts for untouched comments with `status=todo&fields=id,response_prompt`
+- Include `#添付 [URL]` lines in response prompts when comments have image attachments
+- Use `X-WebPatch-API-Token` for API authentication, including Basic-authenticated environments
 
 #### AI Reflection Check
 
@@ -622,6 +682,7 @@ The core features, including site registration, comments, sharing, and public re
 - `public-project.php`: Public review screen
 - `comments.php`: Comment API for logged-in users
 - `public-comments.php`: Guest comment API
+- `comment-image.php`: Comment attachment image delivery
 - `comment-sheet.php`: Sheet-style comment view
 - `sheet-api.php`: External comment sheet API
 - `ai-check-comments.php`: AI-assisted reflection checks
@@ -640,6 +701,57 @@ The core features, including site registration, comments, sharing, and public re
 - Anyone with a public link token can access that public review page. Disable or regenerate public links when they are no longer needed.
 - PHP and other executable extensions are excluded from uploaded ZIP files, but your web server should also prevent direct execution from the storage directory.
 - Uploaded HTML, comment images, and fetched site files may contain confidential information. Define backup, deletion, and access-control rules before production use.
+- When using the comment sheet API behind Basic authentication, pass the WebPatch API token through `X-WebPatch-API-Token`. Avoid `api_token` query strings in normal operation because URLs can be logged.
+
+### Comment Sheet API
+
+API tokens are issued per comment sheet, which maps to one site project. A single API token can fetch and update comments across every page in that project.
+
+```bash
+curl -sS \
+  -H "X-WebPatch-API-Token: <API_TOKEN>" \
+  "https://cognify.works/webpatch/sheet-api"
+```
+
+For Basic-authenticated environments, pass Basic credentials and the WebPatch API token separately.
+
+```bash
+curl -sS \
+  -u BASIC_ID:BASIC_PASSWORD \
+  -H "X-WebPatch-API-Token: <API_TOKEN>" \
+  "https://cognify.works/webpatch/sheet-api?status=todo&fields=id,response_prompt"
+```
+
+Main GET parameters:
+
+- `status`: `todo`, `doing`, `pending`, or `done`. Multiple statuses can be comma-separated.
+- `fields`: Comma-separated field list such as `id`, `file_path`, `selector`, `body`, `sheet_status`, `status_label`, `desired_due_at`, `attachments`, `attachment_paths`, or `response_prompt`.
+
+Update comments with `PATCH` or `POST`.
+
+```bash
+curl -sS -X PATCH \
+  -H "X-WebPatch-API-Token: <API_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"comment_id":123,"sheet_status":"doing","desired_due_at":"2026-05-31T18:00"}' \
+  "https://cognify.works/webpatch/sheet-api"
+```
+
+Writable fields:
+
+- `sheet_status`: `todo`, `doing`, `pending`, or `done`
+- `desired_due_at`: Desired completion datetime. Send an empty string to clear it.
+- `body`: Comment body. Updating it resets the AI check status to unchecked.
+
+`response_prompt` uses this format. If the comment has attachments, `#添付` lines are included.
+
+```text
+#対象 : target page / selector
+#コメント : comment body
+#添付 https://cognify.works/webpatch/comment-image.php?id=...
+```
+
+When fetching attachment URLs with an API token, include `X-WebPatch-API-Token` on the image request as well.
 
 ### Good Use Cases
 

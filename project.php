@@ -1329,7 +1329,12 @@ ob_start();
     const commentClipboardText = (comment, thread) => {
       const file = thread.file_path || activeFile;
       const target = `${fileCopyTargets[file] || file} の ${thread.selector || ''}`;
-      const baseText = `#対象 : ${target}\n#コメント : ${comment.body || ''}`;
+      const attachmentLines = Array.isArray(comment.images)
+        ? comment.images
+            .map((image) => image && image.id ? `#添付 ${new URL(`${commentImageBaseUrl}?id=${encodeURIComponent(image.id)}`, window.location.origin).toString()}` : '')
+            .filter(Boolean)
+        : [];
+      const baseText = [`#対象 : ${target}`, `#コメント : ${comment.body || ''}`, ...attachmentLines].join('\n');
       const prompt = String(window.webpatchCopyPromptAddon || '').trim();
       return prompt ? `${baseText}\n\n${prompt}` : baseText;
     };
@@ -1415,7 +1420,7 @@ ob_start();
         button.className = 'comment-list-item';
         const currentMissingTarget = !thread.is_resolved && hasThreadViewport(thread) && isCurrentFileThread(thread) && !threadTargetExists(thread);
         button.classList.toggle('resolved', Boolean(thread.is_resolved));
-        button.classList.toggle('confirmation-pending', Boolean(thread.is_confirmation_pending));
+        button.classList.toggle('confirmation-pending', !thread.is_resolved && Boolean(thread.is_confirmation_pending));
         button.classList.toggle('missing-target', currentMissingTarget);
         button.classList.toggle('unread-activity', Boolean(thread.has_unread_activity));
         button.classList.toggle('active', Number(thread.id) === Number(selectedThreadId));
@@ -1430,7 +1435,7 @@ ob_start();
           newDot.title = '新しいコメント';
           newDot.setAttribute('aria-label', '新しいコメント');
           label.prepend(newDot);
-        } else if (thread.is_confirmation_pending) {
+        } else if (!thread.is_resolved && thread.is_confirmation_pending) {
           const pendingDot = document.createElement('span');
           pendingDot.className = 'comment-pending-dot';
           pendingDot.title = '確認待ち';

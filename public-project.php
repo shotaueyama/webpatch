@@ -128,7 +128,10 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
                 <h2 id="comment-modal-title">コメント</h2>
                 <p data-comment-modal-selector></p>
               </div>
-              <button class="icon-button" type="button" data-comment-modal-close aria-label="閉じる">×</button>
+              <div class="comment-modal-actions">
+                <button class="comment-resolve-button" type="button" data-comment-resolve-toggle hidden>解決済みにする</button>
+                <button class="icon-button" type="button" data-comment-modal-close aria-label="閉じる">×</button>
+              </div>
             </div>
             <div class="comment-thread" data-comment-thread></div>
             <form class="comment-reply-form" data-comment-reply-form>
@@ -317,6 +320,7 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
         const replyForm = document.querySelector('[data-comment-reply-form]');
         const replyLabel = document.getElementById('comment_reply_label');
         const submitButton = document.querySelector('[data-comment-submit]');
+        const resolveButton = document.querySelector('[data-comment-resolve-toggle]');
         const deleteModal = document.querySelector('[data-comment-delete-modal]');
         const deleteConfirmButton = document.querySelector('[data-comment-delete-confirm]');
         const deleteCancelButtons = Array.from(document.querySelectorAll('[data-comment-delete-cancel]'));
@@ -608,6 +612,11 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
           replyForm.elements.guest_name.value = localStorage.getItem('webpatch-public-guest-name') || 'ゲスト';
           replyLabel.textContent = '返信';
           submitButton.textContent = '返信する';
+          if (resolveButton) {
+            resolveButton.hidden = !thread.can_resolve;
+            resolveButton.classList.toggle('resolved', Boolean(thread.is_resolved));
+            resolveButton.textContent = thread.is_resolved ? '解決済みを解除' : '解決済みにする';
+          }
           modal.hidden = false;
           requestAnimationFrame(() => {
             if (preserveScroll && previewWindow) previewWindow.scrollTo(previewScrollX, previewScrollY);
@@ -633,6 +642,10 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
           replyForm.elements.guest_name.value = localStorage.getItem('webpatch-public-guest-name') || 'ゲスト';
           replyLabel.textContent = 'コメント';
           submitButton.textContent = 'コメントする';
+          if (resolveButton) {
+            resolveButton.hidden = true;
+            resolveButton.classList.remove('resolved');
+          }
           modal.hidden = false;
           requestAnimationFrame(() => {
             if (previewWindow) previewWindow.scrollTo(previewScrollX, previewScrollY);
@@ -659,6 +672,10 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
           replyForm.elements.body.value = comment.body || '';
           replyLabel.textContent = 'コメント';
           submitButton.textContent = '保存する';
+          if (resolveButton) {
+            resolveButton.hidden = true;
+            resolveButton.classList.remove('resolved');
+          }
           modal.hidden = false;
           requestAnimationFrame(() => {
             if (previewWindow) previewWindow.scrollTo(previewScrollX, previewScrollY);
@@ -666,7 +683,18 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
             replyForm.elements.body.focus({ preventScroll: true });
           });
         };
-        const closeModal = () => { modal.hidden = true; activeThreadId = null; draftSelector = null; editCommentId = null; editCommentFile = activeFile; };
+        const closeModal = () => {
+          modal.hidden = true;
+          activeThreadId = null;
+          draftSelector = null;
+          editCommentId = null;
+          editCommentFile = activeFile;
+          if (resolveButton) {
+            resolveButton.hidden = true;
+            resolveButton.classList.remove('resolved');
+            resolveButton.disabled = false;
+          }
+        };
         const clearMarkers = (doc) => {
           doc.querySelectorAll('[data-webpatch-comment-marker]').forEach((marker) => marker.remove());
           const layer = doc.getElementById('webpatch-comment-marker-layer');
@@ -908,7 +936,7 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
             button.className = 'comment-list-item';
             const currentMissingTarget = !thread.is_resolved && hasThreadViewport(thread) && isCurrentFileThread(thread) && !threadTargetExists(thread);
             button.classList.toggle('resolved', Boolean(thread.is_resolved));
-            button.classList.toggle('confirmation-pending', Boolean(thread.is_confirmation_pending));
+            button.classList.toggle('confirmation-pending', !thread.is_resolved && Boolean(thread.is_confirmation_pending));
             button.classList.toggle('missing-target', currentMissingTarget);
             button.classList.toggle('active', Number(thread.id) === Number(selectedThreadId));
             button.setAttribute('role', 'button');
@@ -922,7 +950,7 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
               newDot.title = '新しいコメント';
               newDot.setAttribute('aria-label', '新しいコメント');
               label.prepend(newDot);
-            } else if (thread.is_confirmation_pending) {
+            } else if (!thread.is_resolved && thread.is_confirmation_pending) {
               const pendingDot = document.createElement('span');
               pendingDot.className = 'comment-pending-dot';
               pendingDot.title = '確認待ち';
@@ -1030,7 +1058,12 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
         const commentClipboardText = (comment, thread) => {
           const file = thread.file_path || activeFile;
           const target = `${fileCopyTargets[file] || file} の ${thread.selector || ''}`;
-          return `#対象 : ${target}\n#コメント : ${comment.body || ''}`;
+          const attachmentLines = Array.isArray(comment.images)
+            ? comment.images
+                .map((image) => image && image.id ? `#添付 ${new URL(`${commentImageBaseUrl}?id=${encodeURIComponent(image.id)}&token=${encodeURIComponent(token)}`, window.location.origin).toString()}` : '')
+                .filter(Boolean)
+            : [];
+          return [`#対象 : ${target}`, `#コメント : ${comment.body || ''}`, ...attachmentLines].join('\n');
         };
         const copyTextToClipboard = async (text) => {
           if (navigator.clipboard && window.isSecureContext) {
@@ -1171,6 +1204,50 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
           }
         };
         const deleteComment = (comment) => openDeleteModal(comment);
+        const toggleResolved = async () => {
+          if (!activeThreadId || !resolveButton) {
+            return;
+          }
+          const thread = threadById(activeThreadId);
+          const targetFile = resolveThreadFile(thread) || activeFile;
+          resolveButton.disabled = true;
+          try {
+            const response = await fetch('<?= h(base_url('public-comments.php')) ?>', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+              },
+              body: JSON.stringify({
+                csrf_token: csrfToken,
+                token,
+                file: targetFile,
+                guest_key: guestKey,
+                action: 'resolve',
+                comment_id: activeThreadId
+              })
+            });
+            const result = await response.json();
+            if (!response.ok || !result.ok) {
+              throw new Error(result.message || 'コメント状態を更新できませんでした。');
+            }
+            threads = (result.threads || []).filter(isCurrentFileThread);
+            renderList();
+            renderMarkers();
+            const nextThread = threadById(activeThreadId);
+            if (nextThread) {
+              focusCommentListItem(nextThread);
+              renderModal(nextThread);
+            } else {
+              closeModal();
+            }
+            showToast(result.resolved ? 'コメントを解決済みにしました。' : '解決済みを解除しました。', 'success');
+          } catch (error) {
+            showToast(error.message || 'コメント状態を更新できませんでした。', 'error');
+          } finally {
+            resolveButton.disabled = false;
+          }
+        };
         window.webpatchSetCommentMode = (enabled) => {
           commentMode = enabled;
           commentToggle.classList.toggle('active', commentMode);
@@ -1189,6 +1266,9 @@ $previewUrl = base_url('public-preview.php?token=' . rawurlencode($token) . '&fi
         };
         commentToggle.addEventListener('click', () => window.webpatchSetCommentMode(!commentMode));
         closeButton.addEventListener('click', closeModal);
+        if (resolveButton) {
+          resolveButton.addEventListener('click', toggleResolved);
+        }
         modal.addEventListener('click', (event) => { if (event.target === modal) closeModal(); });
         replyForm.addEventListener('submit', async (event) => {
           event.preventDefault();

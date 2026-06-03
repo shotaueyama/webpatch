@@ -213,6 +213,8 @@ ob_start();
     const appendTrigger = document.querySelector('[data-note-append-trigger]');
     const deleteModal = document.querySelector('[data-note-delete-modal]');
     const deleteConfirmButton = document.querySelector('[data-note-delete-confirm]');
+    const deleteTitle = document.getElementById('note-delete-title');
+    const deleteMessage = document.getElementById('note-delete-message');
     const deleteCancelButtons = Array.from(document.querySelectorAll('[data-note-delete-cancel]'));
     const modal = document.querySelector('[data-note-share-modal]');
     const closeButton = document.querySelector('[data-note-share-modal-close]');
@@ -225,6 +227,7 @@ ob_start();
     let isSaving = false;
     let isReplacingDocument = false;
     let pendingDeleteDocument = null;
+    let pendingDeleteDeletesNote = false;
 
     const refreshToc = () => {
       if (typeof window.webpatchBuildNoteToc === 'function') {
@@ -349,6 +352,7 @@ ob_start();
       const icons = {
         delete: '<svg class="note-document-tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M9.25 4.75h5.5M5.75 7.25h12.5M8 7.25l.45 11.2a1.9 1.9 0 0 0 1.9 1.8h3.3a1.9 1.9 0 0 0 1.9-1.8L16 7.25M10.5 10.5v6M13.5 10.5v6" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>',
         upload: '<svg class="note-document-tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16.25V5.75m0 0-3.6 3.6M12 5.75l3.6 3.6M5.75 17.75v.75a2 2 0 0 0 2 2h8.5a2 2 0 0 0 2-2v-.75" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+        download: '<svg class="note-document-tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.75v10.5m0 0 3.6-3.6M12 15.25l-3.6-3.6M5.75 18.25v.5a2 2 0 0 0 2 2h8.5a2 2 0 0 0 2-2v-.5" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/></svg>',
         edit: '<svg class="note-document-tool-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5.25 18.75h4.05L18.6 9.45a2.05 2.05 0 0 0 0-2.9L17.45 5.4a2.05 2.05 0 0 0-2.9 0l-9.3 9.3v4.05Z" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linejoin="round"/><path d="m13.65 6.3 4.05 4.05" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"/></svg>'
       };
       return icons[action] || icons.edit;
@@ -409,11 +413,21 @@ ob_start();
     const openDeleteModal = (documentBlock) => {
       if (!deleteModal || !documentBlock) return;
       const documents = Array.from(article.querySelectorAll(':scope > .note-document'));
-      if (documents.length <= 1) {
-        window.webpatchShowToast('最後のドキュメントは削除できません。', 'error');
+      const isLastDocument = documents.length <= 1;
+      if (isLastDocument && !<?= $canManageNote ? 'true' : 'false' ?>) {
+        window.webpatchShowToast('最後のドキュメント削除は所有者のみ可能です。', 'error');
         return;
       }
       pendingDeleteDocument = documentBlock;
+      pendingDeleteDeletesNote = isLastDocument;
+      if (deleteTitle) {
+        deleteTitle.textContent = isLastDocument ? 'ノートを削除しますか？' : 'ドキュメントを削除しますか？';
+      }
+      if (deleteMessage) {
+        deleteMessage.textContent = isLastDocument
+          ? '最後のドキュメントを削除すると、このノート全体を削除してノート一覧へ戻ります。'
+          : 'このドキュメントをノートから削除します。削除後は保存され、元に戻すには再アップロードが必要です。';
+      }
       deleteModal.hidden = false;
       document.body.classList.add('modal-open');
       if (deleteConfirmButton) deleteConfirmButton.focus();
@@ -423,6 +437,27 @@ ob_start();
       deleteModal.hidden = true;
       document.body.classList.remove('modal-open');
       pendingDeleteDocument = null;
+      pendingDeleteDeletesNote = false;
+    };
+    const deleteCurrentNote = async () => {
+      try {
+        const response = await fetch('<?= h(base_url('delete-note.php')) ?>', {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            csrf_token: <?= json_encode(csrf_token(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>,
+            id: <?= json_encode(note_public_ref($note), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>
+          })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.message || 'ノートを削除できませんでした。');
+        window.location.href = result.redirect || <?= json_encode(base_url('notes.php'), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+      } catch (error) {
+        window.webpatchShowToast(error.message || 'ノートを削除できませんでした。', 'error');
+      }
     };
     const focusDocument = (documentBlock) => {
       if (!documentBlock) return;
@@ -432,6 +467,28 @@ ob_start();
         if (target) target.focus();
       }, 0);
     };
+    const safeDownloadName = (value, fallback) => {
+      const name = String(value || '').trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, '-').replace(/^-+|-+$/g, '');
+      return (name || fallback || 'document').slice(0, 80);
+    };
+    const downloadNoteMarkdown = () => {
+      const markdown = markdownFromArticle().trim();
+      if (markdown === '') {
+        window.webpatchShowToast('ダウンロードできるMarkdownがありません。', 'error');
+        return;
+      }
+      const fileName = `${safeDownloadName(text(title), 'note')}.md`;
+      const blob = new Blob([markdown + '\n'], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1200);
+      window.webpatchShowToast('Markdownをダウンロードしました。', 'success');
+    };
     const createDocumentToolbar = (documentBlock) => {
       const toolbar = document.createElement('div');
       toolbar.className = 'note-document-toolbar';
@@ -439,6 +496,7 @@ ob_start();
       toolbar.setAttribute('aria-label', 'ドキュメント操作');
       const editButton = createDocumentToolButton('このドキュメントを編集', 'edit', 'edit');
       const uploadButton = createDocumentToolButton('このドキュメントをmdで差し替え', 'upload', 'upload');
+      const downloadButton = createDocumentToolButton('ノート全体をmdでダウンロード', 'download', 'download');
       const deleteButton = createDocumentToolButton('このドキュメントを削除', 'trash', 'delete');
       editButton.addEventListener('click', (event) => {
         event.preventDefault();
@@ -450,12 +508,17 @@ ob_start();
         event.stopPropagation();
         openReplaceFilePicker(documentBlock);
       });
+      downloadButton.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        downloadNoteMarkdown();
+      });
       deleteButton.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
         openDeleteModal(documentBlock);
       });
-      toolbar.append(deleteButton, uploadButton, editButton);
+      toolbar.append(deleteButton, downloadButton, uploadButton, editButton);
       return toolbar;
     };
 
@@ -493,7 +556,7 @@ ob_start();
         const toolbar = documentBlock.querySelector(':scope > .note-document-toolbar');
         if (!toolbar) return;
         const rect = documentBlock.getBoundingClientRect();
-        const toolbarHeight = toolbar.offsetHeight || 130;
+        const toolbarHeight = toolbar.offsetHeight || 176;
         const padding = 12;
         const maxViewportTop = rect.bottom - toolbarHeight - padding;
         const viewportTop = Math.min(Math.max(targetTop, rect.top + padding), maxViewportTop);
@@ -579,6 +642,11 @@ ob_start();
     if (deleteConfirmButton) {
       deleteConfirmButton.addEventListener('click', async () => {
         if (!pendingDeleteDocument || !article) return;
+        if (pendingDeleteDeletesNote) {
+          closeDeleteModal();
+          await deleteCurrentNote();
+          return;
+        }
         const documentBlock = pendingDeleteDocument;
         const nextSibling = documentBlock.nextSibling;
         documentBlock.remove();

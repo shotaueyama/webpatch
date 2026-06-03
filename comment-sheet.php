@@ -53,6 +53,41 @@ function normalize_sheet_status(string $status): string
     return in_array($status, ['todo', 'doing', 'pending', 'done'], true) ? $status : 'todo';
 }
 
+function sheet_comment_attachment_map(array $commentIds, string $publicToken = ''): array
+{
+    $commentIds = array_values(array_unique(array_map('intval', $commentIds)));
+    if ($commentIds === []) {
+        return [];
+    }
+
+    $placeholders = implode(',', array_fill(0, count($commentIds), '?'));
+    $stmt = db()->prepare(
+        'SELECT id, comment_id, original_filename, mime_type, byte_size
+           FROM ' . table_name('comment_images') . '
+          WHERE comment_id IN (' . $placeholders . ')
+          ORDER BY id ASC'
+    );
+    $stmt->execute($commentIds);
+
+    $attachments = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $path = absolute_url('comment-image.php?id=' . rawurlencode((string) $row['id']));
+        if ($publicToken !== '') {
+            $path .= '&token=' . rawurlencode($publicToken);
+        }
+        $attachments[(int) $row['comment_id']][] = [
+            'id' => (int) $row['id'],
+            'filename' => $row['original_filename'],
+            'mime_type' => $row['mime_type'],
+            'byte_size' => (int) $row['byte_size'],
+            'path' => $path,
+            'url' => $path,
+        ];
+    }
+
+    return $attachments;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     try {
         $payload = json_decode((string) file_get_contents('php://input'), true);
@@ -157,7 +192,10 @@ $stmt = db()->prepare(
 $stmt->execute([(int) $project['id']]);
 
 $comments = [];
-foreach ($stmt->fetchAll() as $row) {
+$commentRows = $stmt->fetchAll();
+$attachmentsByComment = sheet_comment_attachment_map(array_column($commentRows, 'id'), $publicToken);
+foreach ($commentRows as $row) {
+    $attachments = $attachmentsByComment[(int) $row['id']] ?? [];
     $comments[] = [
         'id' => (int) $row['id'],
         'file_path' => $row['file_path'],
@@ -176,6 +214,8 @@ foreach ($stmt->fetchAll() as $row) {
         'confirmation_pending_at' => $row['confirmation_pending_at'],
         'created_at' => $row['created_at'],
         'user_name' => $row['user_name'] ?: 'ゲスト',
+        'attachments' => $attachments,
+        'attachment_paths' => array_map(static fn (array $attachment): string => (string) $attachment['path'], $attachments),
     ];
 }
 
@@ -274,6 +314,10 @@ $sheetData = [
             <span>CSVダウンロード</span>
           </button>
           <?php if ($canManageApi): ?>
+          <button class="sheet-download-button" id="api-reference-download-button" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5.5 5.25A2.25 2.25 0 0 1 7.75 3h10.75v16.5H7.75A2.25 2.25 0 0 1 5.5 17.25v-12Zm2.25 14.25A2.25 2.25 0 0 0 5.5 21.75M8.5 7h6.75M8.5 10.25h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span>APIリファレンス</span>
+          </button>
           <button class="sheet-download-button" id="api-button" type="button">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 8.75h-1A3.25 3.25 0 0 0 4.25 12v0a3.25 3.25 0 0 0 3.25 3.25h1m7-6.5h1A3.25 3.25 0 0 1 19.75 12v0a3.25 3.25 0 0 1-3.25 3.25h-1M8.75 12h6.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
             <span>API</span>
@@ -287,6 +331,7 @@ $sheetData = [
         <select class="sheet-editor sheet-select-editor" id="status-editor" aria-label="ステータス">
           <option value="todo">未着手</option>
           <option value="doing">対応中</option>
+          <option value="pending">確認待ち</option>
           <option value="done">解決済み</option>
         </select>
         <textarea class="sheet-editor sheet-body-editor" id="body-editor" aria-label="コメント内容"></textarea>
@@ -350,6 +395,7 @@ $sheetData = [
         const contextMenu = document.getElementById('sheet-context-menu');
         const copyEditPromptButton = document.getElementById('copy-edit-prompt-button');
         const csvDownloadButton = document.getElementById('csv-download-button');
+        const apiReferenceDownloadButton = document.getElementById('api-reference-download-button');
         const apiButton = document.getElementById('api-button');
         const apiModal = document.getElementById('api-modal');
         const apiCloseButton = document.getElementById('api-close-button');
@@ -383,7 +429,8 @@ $sheetData = [
           { key: 'due', label: '希望完了日時', width: 190 },
           { key: 'ai_status', label: 'AI確認', width: 140 },
           { key: 'ai_summary', label: 'AI要約', width: 420 },
-          { key: 'ai_checked_at', label: 'AI確認日時', width: 180 }
+          { key: 'ai_checked_at', label: 'AI確認日時', width: 180 },
+          { key: 'response_prompt', label: '対応プロンプト', width: 620 }
         ];
         const commentCountByFile = new Map();
         sheetData.comments.forEach((comment) => {
@@ -436,7 +483,10 @@ $sheetData = [
         const commentClipboardText = (comment) => {
           const file = comment.file_path || activeFile;
           const target = `${sheetData.file_copy_targets[file] || file} の ${comment.selector || ''}`;
-          const baseText = `#対象 : ${target}\n#コメント : ${comment.body || ''}`;
+          const attachmentLines = Array.isArray(comment.attachment_paths)
+            ? comment.attachment_paths.map((path) => String(path || '').trim()).filter(Boolean).map((path) => `#添付 ${path}`)
+            : [];
+          const baseText = [`#対象 : ${target}`, `#コメント : ${comment.body || ''}`, ...attachmentLines].join('\n');
           const prompt = String(sheetData.copy_prompt || '').trim();
           return prompt ? `${baseText}\n\n${prompt}` : baseText;
         };
@@ -446,7 +496,7 @@ $sheetData = [
         };
         const downloadCsv = async () => {
           await commitOpenEditors();
-          const header = ['ページ', 'コメントの位置', 'コメント内容', 'ステータス', '希望完了日時', 'AI確認', 'AI要約', 'AI確認日時', 'AIプロバイダ', 'AIモデル', '投稿者', '作成日時'];
+          const header = ['ページ', 'コメントの位置', 'コメント内容', 'ステータス', '希望完了日時', 'AI確認', 'AI要約', 'AI確認日時', 'AIプロバイダ', 'AIモデル', '投稿者', '作成日時', '対応プロンプト'];
           const rows = sheetData.comments.map((comment) => [
             comment.file_path || '',
             comment.selector || '',
@@ -459,7 +509,8 @@ $sheetData = [
             comment.ai_check_provider || '',
             comment.ai_check_model || '',
             comment.user_name || '',
-            formatDue(comment.created_at)
+            formatDue(comment.created_at),
+            commentClipboardText(comment)
           ]);
           const csv = [header, ...rows].map((row) => row.map(csvEscape).join(',')).join('\r\n');
           const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8' });
@@ -474,12 +525,202 @@ $sheetData = [
           URL.revokeObjectURL(url);
           showToast('CSVをダウンロードしました。');
         };
+        const apiReferenceMarkdown = () => {
+          const endpoint = sheetData.api.endpoint_url;
+          const projectTitle = sheetData.project.title || 'WebPatch Project';
+          const generatedAt = new Date().toISOString();
+          return [
+            `# WebPatch コメントシートAPI リファレンス`,
+            '',
+            `対象プロジェクト: ${projectTitle}`,
+            `生成日時: ${generatedAt}`,
+            '',
+            '## 概要',
+            '',
+            'WebPatchのコメントシートを外部ツールやローカルAIエージェントから取得・更新するためのAPIです。',
+            'APIトークンはコメントシート画面の「API」ボタンから発行します。',
+            '',
+            '## エンドポイント',
+            '',
+            '```text',
+            endpoint,
+            '```',
+            '',
+            '## 認証',
+            '',
+            'HTTPヘッダーにAPIトークンを指定します。Basic認証と併用する場合は `X-WebPatch-API-Token` を推奨します。',
+            '',
+            '```http',
+            'X-WebPatch-API-Token: <API_TOKEN>',
+            '```',
+            '',
+            '`Authorization: Bearer` でも認証できます。',
+            '',
+            '```http',
+            'Authorization: Bearer <API_TOKEN>',
+            '```',
+            '',
+            'クエリパラメータ `api_token` でも認証できますが、URLログに残りやすいため推奨しません。',
+            '',
+            '### Basic認証と併用する場合',
+            '',
+            '```bash',
+            `curl -sS -u BASIC_ID:BASIC_PASSWORD -H "X-WebPatch-API-Token: <API_TOKEN>" "${endpoint}?status=todo&fields=id,response_prompt"`,
+            '```',
+            '',
+            '## GET コメント一覧取得',
+            '',
+            '```bash',
+            `curl -sS -H "X-WebPatch-API-Token: <API_TOKEN>" "${endpoint}"`,
+            '```',
+            '',
+            '### GET クエリパラメータ',
+            '',
+            '| パラメータ | 値 | 説明 |',
+            '| --- | --- | --- |',
+            '| `status` | `todo`, `doing`, `pending`, `done` | 指定したステータスだけ取得。カンマ区切りで複数指定可。 |',
+            '| `fields` | `id`, `file_path`, `selector`, `body`, `sheet_status`, `status_label`, `desired_due_at`, `attachments`, `attachment_paths`, `response_prompt` など | 返却フィールドを限定。カンマ区切りで複数指定可。 |',
+            '',
+            '### 未着手の対応プロンプトだけ取得',
+            '',
+            '```bash',
+            `curl -sS -H "X-WebPatch-API-Token: <API_TOKEN>" "${endpoint}?status=todo&fields=id,response_prompt"`,
+            '```',
+            '',
+            '## PATCH / POST コメント更新',
+            '',
+            '単一コメント更新:',
+            '',
+            '```bash',
+            `curl -sS -X PATCH -H "X-WebPatch-API-Token: <API_TOKEN>" -H "Content-Type: application/json" \\`,
+            `  -d '{"comment_id":123,"sheet_status":"doing","desired_due_at":"2026-05-31T18:00"}' \\`,
+            `  "${endpoint}"`,
+            '```',
+            '',
+            '複数コメント更新:',
+            '',
+            '```json',
+            '{',
+            '  "updates": [',
+            '    { "comment_id": 123, "sheet_status": "doing" },',
+            '    { "comment_id": 124, "sheet_status": "done" }',
+            '  ]',
+            '}',
+            '```',
+            '',
+            '### 更新可能フィールド',
+            '',
+            '| フィールド | 値 | 説明 |',
+            '| --- | --- | --- |',
+            '| `comment_id` | 数値 | 更新対象コメントID。必須。 |',
+            '| `sheet_status` | `todo`, `doing`, `pending`, `done` | ステータス。`done` は解決済みと連動します。 |',
+            '| `desired_due_at` | `YYYY-MM-DDTHH:mm` または空文字 | 希望完了日時。空文字でクリア。 |',
+            '| `body` | 文字列 | コメント本文。更新するとAI確認状態は未確認に戻ります。 |',
+            '',
+            '## ステータス',
+            '',
+            '| API値 | 表示名 |',
+            '| --- | --- |',
+            '| `todo` | 未着手 |',
+            '| `doing` | 対応中 |',
+            '| `pending` | 確認待ち |',
+            '| `done` | 解決済み |',
+            '',
+            '## レスポンス主要フィールド',
+            '',
+            '| フィールド | 説明 |',
+            '| --- | --- |',
+            '| `id` | コメントID |',
+            '| `file_path` | 対象ページパス |',
+            '| `selector` | コメント対象DOMのselector |',
+            '| `comment_position` | ページパスとselectorを結合した位置情報 |',
+            '| `body` | コメント内容 |',
+            '| `sheet_status` / `status` | ステータスAPI値 |',
+            '| `status_label` | 日本語ステータス |',
+            '| `desired_due_at` | 希望完了日時 |',
+            '| `attachments` | 添付ファイル情報。`path` / `url` に添付画像URLが入ります。 |',
+            '| `attachment_paths` | 添付画像URLの配列。 |',
+            '| `response_prompt` | AIエージェント向け対応プロンプト。添付がある場合は `#添付 [パス]` 行が入り、追加プロンプト設定があれば末尾に付与されます。 |',
+            '| `ai_check_status` | AI確認ステータス |',
+            '| `ai_check_summary` | AI確認要約 |',
+            '',
+            '添付URLをAPIトークンで取得する場合は、画像リクエストにも `X-WebPatch-API-Token` を付けてください。',
+            '',
+            '## Python例',
+            '',
+            '```python',
+            'import requests',
+            '',
+            `endpoint = ${JSON.stringify(endpoint)}`,
+            'token = "<API_TOKEN>"',
+            'headers = {"X-WebPatch-API-Token": token}',
+            '',
+            'todo_prompts = requests.get(',
+            '    endpoint,',
+            '    headers=headers,',
+            '    params={"status": "todo", "fields": "id,response_prompt"},',
+            '    timeout=20,',
+            ').json()',
+            'print(todo_prompts["comments"])',
+            '```',
+            '',
+            '## JavaScript例',
+            '',
+            '```js',
+            `const endpoint = ${JSON.stringify(endpoint)};`,
+            'const token = "<API_TOKEN>";',
+            'const url = new URL(endpoint);',
+            'url.searchParams.set("status", "todo");',
+            'url.searchParams.set("fields", "id,response_prompt");',
+            '',
+            'const data = await fetch(url, {',
+            '  headers: { "X-WebPatch-API-Token": token }',
+            '}).then((res) => res.json());',
+            '',
+            'console.log(data.comments);',
+            '```',
+            '',
+            '## PHP例',
+            '',
+            '```php',
+            '<?php',
+            `$endpoint = ${JSON.stringify(endpoint)};`,
+            '$token = "<API_TOKEN>";',
+            '$url = $endpoint . "?status=todo&fields=id,response_prompt";',
+            '$context = stream_context_create([',
+            '    "http" => [',
+            '        "header" => "X-WebPatch-API-Token: {$token}\\r\\n",',
+            '        "ignore_errors" => true,',
+            '    ],',
+            ']);',
+            '$data = json_decode((string) file_get_contents($url, false, $context), true);',
+            'print_r($data["comments"] ?? []);',
+            '```',
+            ''
+          ].join('\n');
+        };
+        const downloadApiReference = () => {
+          const blob = new Blob([apiReferenceMarkdown()], { type: 'text/markdown;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          const title = String(sheetData.project.title || 'webpatch').replace(/[\\/:*?"<>|]+/g, '_');
+          link.href = url;
+          link.download = `${title}_comment_sheet_api_reference.md`;
+          document.body.append(link);
+          link.click();
+          link.remove();
+          URL.revokeObjectURL(url);
+          showToast('APIリファレンスをダウンロードしました。');
+        };
         const apiCurlExample = (token = '<API_TOKEN>') => {
           const endpoint = sheetData.api.endpoint_url;
+          const promptEndpoint = `${endpoint}?status=todo&fields=response_prompt`;
           return [
-            `curl -sS -H "Authorization: Bearer ${token}" "${endpoint}"`,
+            `curl -sS -H "X-WebPatch-API-Token: ${token}" "${endpoint}"`,
             '',
-            `curl -sS -X PATCH -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" \\`,
+            `curl -sS -H "X-WebPatch-API-Token: ${token}" "${promptEndpoint}"`,
+            '',
+            `curl -sS -X PATCH -H "X-WebPatch-API-Token: ${token}" -H "Content-Type: application/json" \\`,
             `  -d '{"comment_id":123,"sheet_status":"doing","desired_due_at":"2026-05-31T18:00"}' \\`,
             `  "${endpoint}"`
           ].join('\n');
@@ -492,9 +733,17 @@ $sheetData = [
             `endpoint = ${JSON.stringify(endpoint)}`,
             `token = ${JSON.stringify(token)}`,
             '',
-            'headers = {"Authorization": f"Bearer {token}"}',
+            'headers = {"X-WebPatch-API-Token": token}',
             'comments = requests.get(endpoint, headers=headers, timeout=20).json()',
             'print(comments)',
+            '',
+            'todo_prompts = requests.get(',
+            '    endpoint,',
+            '    headers=headers,',
+            '    params={"status": "todo", "fields": "response_prompt"},',
+            '    timeout=20,',
+            ').json()',
+            'print(todo_prompts["comments"])',
             '',
             'payload = {',
             '    "comment_id": 123,',
@@ -511,9 +760,15 @@ $sheetData = [
             `const endpoint = ${JSON.stringify(endpoint)};`,
             `const token = ${JSON.stringify(token)};`,
             '',
-            'const headers = { Authorization: `Bearer ${token}` };',
+            'const headers = { "X-WebPatch-API-Token": token };',
             'const comments = await fetch(endpoint, { headers }).then((res) => res.json());',
             'console.log(comments);',
+            '',
+            'const todoPromptsUrl = new URL(endpoint);',
+            'todoPromptsUrl.searchParams.set("status", "todo");',
+            'todoPromptsUrl.searchParams.set("fields", "response_prompt");',
+            'const todoPrompts = await fetch(todoPromptsUrl, { headers }).then((res) => res.json());',
+            'console.log(todoPrompts.comments);',
             '',
             'const updated = await fetch(endpoint, {',
             '  method: "PATCH",',
@@ -538,7 +793,7 @@ $sheetData = [
             '    $context = [',
             '        "http" => [',
             '            "method" => $method,',
-            '            "header" => "Authorization: Bearer {$token}\\r\\nContent-Type: application/json\\r\\n",',
+            '            "header" => "X-WebPatch-API-Token: {$token}\\r\\nContent-Type: application/json\\r\\n",',
             '            "ignore_errors" => true,',
             '        ],',
             '    ];',
@@ -551,6 +806,9 @@ $sheetData = [
             '',
             '$comments = webpatch_api("GET", $endpoint, $token);',
             'print_r($comments);',
+            '',
+            '$todoPrompts = webpatch_api("GET", $endpoint . "?status=todo&fields=response_prompt", $token);',
+            'print_r($todoPrompts["comments"] ?? []);',
             '',
             '$updated = webpatch_api("PATCH", $endpoint, $token, [',
             '    "comment_id" => 123,',
@@ -640,19 +898,21 @@ $sheetData = [
           showToast('保存しました。');
         };
         const wrapText = (text, maxWidth) => {
-          const chars = String(text || '').split('');
           const lines = [];
-          let line = '';
-          for (const char of chars) {
-            const next = line + char;
-            if (ctx.measureText(next).width > maxWidth && line) {
-              lines.push(line);
-              line = char;
-              continue;
+          String(text || '').split(/\r?\n/).forEach((paragraph) => {
+            const chars = paragraph.split('');
+            let line = '';
+            for (const char of chars) {
+              const next = line + char;
+              if (ctx.measureText(next).width > maxWidth && line) {
+                lines.push(line);
+                line = char;
+                continue;
+              }
+              line = next;
             }
-            line = next;
-          }
-          if (line) lines.push(line);
+            lines.push(line);
+          });
           return lines;
         };
         const rowTextValue = (comment, key) => {
@@ -661,6 +921,7 @@ $sheetData = [
           if (key === 'due') return formatDue(comment.desired_due_at);
           if (key === 'ai_summary') return comment.ai_check_summary || '';
           if (key === 'ai_checked_at') return formatDue(comment.ai_checked_at);
+          if (key === 'response_prompt') return commentClipboardText(comment);
           return '';
         };
         const rowMetrics = (rows) => {
@@ -851,7 +1112,8 @@ $sheetData = [
             const rowHeight = metrics[index].height;
             const y = headerHeight + metrics[index].y - scrollY;
             if (y + rowHeight < headerHeight || y > height) return;
-            ctx.fillStyle = index % 2 === 0 ? '#fff' : '#fbfdff';
+            const isResolvedRow = comment.sheet_status === 'done' || Boolean(comment.resolved_at);
+            ctx.fillStyle = isResolvedRow ? '#f1f3f6' : (index % 2 === 0 ? '#fff' : '#fbfdff');
             ctx.fillRect(0, y, Math.max(width, totalWidth), rowHeight);
             ctx.strokeStyle = '#d8e0eb';
             ctx.lineWidth = 1;
@@ -867,7 +1129,7 @@ $sheetData = [
             ctx.lineTo(Math.max(width, totalWidth), y + rowHeight + .5);
             ctx.stroke();
 
-            ctx.fillStyle = '#94a3b8';
+            ctx.fillStyle = isResolvedRow ? '#7b8491' : '#94a3b8';
             ctx.font = '600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
             ctx.fillText(String(index + 1), 18, y + rowHeight / 2);
 
@@ -881,21 +1143,21 @@ $sheetData = [
               ctx.font = '400 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
               if (col.key === 'status') {
                 const status = statusByKey(comment.sheet_status);
-                ctx.fillStyle = status.bg;
+                ctx.fillStyle = isResolvedRow ? '#e5e7eb' : status.bg;
                 ctx.fillRect(cellX + 12, y + Math.max(14, (rowHeight - 30) / 2), 92, 30);
-                ctx.fillStyle = status.color;
+                ctx.fillStyle = isResolvedRow ? '#4b5563' : status.color;
                 ctx.font = '600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
                 ctx.fillText(status.label, cellX + 30, y + rowHeight / 2);
               } else if (col.key === 'ai_status') {
                 const status = aiStatusByKey(comment.ai_check_status);
-                ctx.fillStyle = status.bg;
+                ctx.fillStyle = isResolvedRow ? '#eef0f3' : status.bg;
                 ctx.fillRect(cellX + 12, y + Math.max(14, (rowHeight - 30) / 2), 92, 30);
-                ctx.fillStyle = status.color;
+                ctx.fillStyle = isResolvedRow ? '#5f6977' : status.color;
                 ctx.font = '600 13px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
                 ctx.fillText(status.label, cellX + 28, y + rowHeight / 2);
               } else {
                 const value = rowTextValue(comment, col.key);
-                ctx.fillStyle = value ? '#20242c' : '#94a3b8';
+                ctx.fillStyle = value ? (isResolvedRow ? '#5f6977' : '#20242c') : '#94a3b8';
                 const lines = wrapText(value || '未設定', col.width - 24);
                 lines.forEach((line, lineIndex) => ctx.fillText(line, cellX + 12, y + 20 + lineIndex * 19));
               }
@@ -937,7 +1199,7 @@ $sheetData = [
         canvas.addEventListener('contextmenu', (event) => {
           const rect = canvas.getBoundingClientRect();
           const cell = cellAt(event.clientX - rect.left, event.clientY - rect.top);
-          if (!cell || cell.col !== 'body') {
+          if (!cell || !['body', 'response_prompt'].includes(cell.col)) {
             hideContextMenu();
             return;
           }
@@ -1078,6 +1340,9 @@ $sheetData = [
         });
         window.addEventListener('resize', hideContextMenu);
         csvDownloadButton.addEventListener('click', downloadCsv);
+        if (apiReferenceDownloadButton) {
+          apiReferenceDownloadButton.addEventListener('click', downloadApiReference);
+        }
         if (apiButton) {
           apiButton.addEventListener('click', openApiModal);
         }

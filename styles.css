@@ -2617,6 +2617,10 @@ body:has(.note-main) {
   color: #7a8494;
 }
 
+.comment-list-item.resolved .comment-pending-dot {
+  display: none;
+}
+
 .comment-list-item strong,
 .comment-list-item small,
 .comment-list-item span {

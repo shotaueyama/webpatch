@@ -159,7 +159,7 @@ function public_comments_payload(int $projectId, ?string $file, string $guestKey
             'is_own' => $guestKey !== '' && hash_equals((string) ($row['guest_key'] ?? ''), $guestKey),
             'can_delete' => $guestKey !== '' && hash_equals((string) ($row['guest_key'] ?? ''), $guestKey),
             'can_edit' => $guestKey !== '' && hash_equals((string) ($row['guest_key'] ?? ''), $guestKey),
-            'can_resolve' => false,
+            'can_resolve' => $row['parent_id'] === null,
             'is_resolved' => $row['resolved_at'] !== null,
             'resolved_at' => $row['resolved_at'],
             'is_confirmation_pending' => $row['confirmation_pending_at'] !== null,
@@ -242,7 +242,7 @@ try {
     $viewportMode = normalize_comment_viewport_mode((string) ($payload['viewport_mode'] ?? ''));
     $action = (string) ($payload['action'] ?? 'create');
 
-    if ($action !== 'delete' && ($body === '' || mb_strlen($body) > 2000)) {
+    if (!in_array($action, ['delete', 'resolve'], true) && ($body === '' || mb_strlen($body) > 2000)) {
         throw new RuntimeException('コメントは1文字以上2000文字以内で入力してください。');
     }
     if ($guestName === '') {
@@ -372,6 +372,31 @@ try {
             'focus_id' => $comment['parent_id'] === null ? $commentId : (int) $comment['parent_id'],
             'threads' => public_comments_payload((int) $project['id'], $file, $guestKey),
         ]);
+    }
+
+    if ($action === 'resolve') {
+        $commentId = (int) ($payload['comment_id'] ?? 0);
+        if ($commentId <= 0) {
+            throw new RuntimeException('対象コメントが見つかりません。');
+        }
+
+        $stmt = db()->prepare(
+            'SELECT id, resolved_at
+               FROM ' . table_name('comments') . '
+              WHERE id = ? AND project_id = ? AND file_path = ? AND parent_id IS NULL
+              LIMIT 1'
+        );
+        $stmt->execute([$commentId, (int) $project['id'], $file]);
+        $comment = $stmt->fetch();
+        if (!$comment) {
+            throw new RuntimeException('対象コメントが見つかりません。');
+        }
+
+        $resolved = $comment['resolved_at'] === null;
+        $stmt = db()->prepare('UPDATE ' . table_name('comments') . ' SET resolved_at = ?, sheet_status = ? WHERE id = ? AND project_id = ? AND file_path = ? AND parent_id IS NULL');
+        $stmt->execute([$resolved ? date('Y-m-d H:i:s') : null, $resolved ? 'done' : 'todo', $commentId, (int) $project['id'], $file]);
+
+        public_comments_response(['ok' => true, 'resolved' => $resolved, 'threads' => public_comments_payload((int) $project['id'], $file, $guestKey)]);
     }
 
     if ($parentId > 0) {

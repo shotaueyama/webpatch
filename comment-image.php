@@ -30,8 +30,23 @@ if ($token !== '') {
     $project = public_project_for_token($token);
     $allowed = $project !== null && (int) $project['id'] === (int) $image['project_id'];
 } else {
+    $apiToken = trim((string) ($_SERVER['HTTP_X_WEBPATCH_API_TOKEN'] ?? ''));
+    if ($apiToken === '') {
+        $header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
+        if (preg_match('/^Bearer\s+(.+)$/i', (string) $header, $matches)) {
+            $apiToken = trim($matches[1]);
+        }
+    }
+    if ($apiToken === '') {
+        $apiToken = trim((string) ($_GET['api_token'] ?? ''));
+    }
+    if ($apiToken !== '') {
+        $project = project_for_comment_sheet_api_token($apiToken);
+        $allowed = $project !== null && (int) $project['id'] === (int) $image['project_id'];
+    }
+
     $user = current_user();
-    if ($user !== null) {
+    if (!$allowed && $user !== null) {
         $project = find_project_for_user((int) $image['project_id'], (int) $user['id']);
         $allowed = $project !== null;
     }

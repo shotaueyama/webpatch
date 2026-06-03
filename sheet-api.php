@@ -40,8 +40,47 @@ function sheet_api_ai_check_status_label(string $status): string
     };
 }
 
+function sheet_api_status_filter_from_request(): ?array
+{
+    $raw = trim((string) ($_GET['status'] ?? ''));
+    if ($raw === '') {
+        return null;
+    }
+
+    $statuses = [];
+    foreach (preg_split('/\s*,\s*/', $raw) ?: [] as $status) {
+        $status = sheet_api_status((string) $status);
+        $statuses[$status] = true;
+    }
+
+    return array_keys($statuses);
+}
+
+function sheet_api_fields_from_request(): ?array
+{
+    $raw = trim((string) ($_GET['fields'] ?? ''));
+    if ($raw === '') {
+        return null;
+    }
+
+    $fields = [];
+    foreach (preg_split('/\s*,\s*/', $raw) ?: [] as $field) {
+        $field = trim((string) $field);
+        if ($field !== '') {
+            $fields[$field] = true;
+        }
+    }
+
+    return $fields === [] ? null : array_keys($fields);
+}
+
 function sheet_api_token_from_request(): string
 {
+    $webpatchToken = trim((string) ($_SERVER['HTTP_X_WEBPATCH_API_TOKEN'] ?? ''));
+    if ($webpatchToken !== '') {
+        return $webpatchToken;
+    }
+
     $header = $_SERVER['HTTP_AUTHORIZATION'] ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION'] ?? '';
     if (preg_match('/^Bearer\s+(.+)$/i', (string) $header, $matches)) {
         return trim($matches[1]);
@@ -49,10 +88,101 @@ function sheet_api_token_from_request(): string
     return trim((string) ($_GET['api_token'] ?? ''));
 }
 
-function sheet_api_comment_rows(int $projectId): array
+function sheet_api_copy_prompt_for_token(array $project): string
+{
+    $tokenId = (int) ($project['api_token_id'] ?? 0);
+    if ($tokenId <= 0) {
+        return '';
+    }
+
+    $stmt = db()->prepare('SELECT created_by FROM ' . table_name('comment_sheet_api_tokens') . ' WHERE id = ? LIMIT 1');
+    $stmt->execute([$tokenId]);
+    $createdBy = (int) ($stmt->fetchColumn() ?: 0);
+    if ($createdBy <= 0) {
+        return '';
+    }
+
+    return project_copy_prompt_for_user((int) $project['id'], $createdBy);
+}
+
+function sheet_api_comment_attachment_map(array $commentIds): array
+{
+    $commentIds = array_values(array_unique(array_map('intval', $commentIds)));
+    if ($commentIds === []) {
+        return [];
+    }
+
+    $placeholders = implode(',', array_fill(0, count($commentIds), '?'));
+    $stmt = db()->prepare(
+        'SELECT id, comment_id, original_filename, mime_type, byte_size
+           FROM ' . table_name('comment_images') . '
+          WHERE comment_id IN (' . $placeholders . ')
+          ORDER BY id ASC'
+    );
+    $stmt->execute($commentIds);
+
+    $attachments = [];
+    foreach ($stmt->fetchAll() as $row) {
+        $commentId = (int) $row['comment_id'];
+        $path = absolute_url('comment-image.php?id=' . rawurlencode((string) $row['id']));
+        $attachments[$commentId][] = [
+            'id' => (int) $row['id'],
+            'filename' => $row['original_filename'],
+            'mime_type' => $row['mime_type'],
+            'byte_size' => (int) $row['byte_size'],
+            'path' => $path,
+            'url' => $path,
+        ];
+    }
+
+    return $attachments;
+}
+
+function sheet_api_response_prompt(array $row, array $fileCopyTargets, string $copyPrompt): string
+{
+    $file = (string) ($row['file_path'] ?? '');
+    $selector = (string) ($row['selector'] ?? '');
+    $target = ($fileCopyTargets[$file] ?? $file) . ' の ' . $selector;
+    $lines = [
+        '#対象 : ' . $target,
+        '#コメント : ' . (string) ($row['body'] ?? ''),
+    ];
+    foreach (($row['attachment_paths'] ?? []) as $path) {
+        $path = trim((string) $path);
+        if ($path !== '') {
+            $lines[] = '#添付 ' . $path;
+        }
+    }
+    $copyPrompt = trim($copyPrompt);
+    $baseText = implode("\n", $lines);
+
+    return $copyPrompt === '' ? $baseText : $baseText . "\n\n" . $copyPrompt;
+}
+
+function sheet_api_apply_fields(array $row, ?array $fields): array
+{
+    if ($fields === null) {
+        return $row;
+    }
+
+    $filtered = [];
+    foreach ($fields as $field) {
+        if (array_key_exists($field, $row)) {
+            $filtered[$field] = $row[$field];
+        }
+    }
+
+    return $filtered;
+}
+
+function sheet_api_comment_rows(array $project, ?array $statusFilter = null, ?array $fields = null): array
 {
     ensure_comment_confirmation_columns();
     ensure_comment_ai_check_columns();
+    $projectId = (int) $project['id'];
+    $files = sheet_api_files($project);
+    $fileCopyTargets = project_file_copy_targets($project, $files);
+    $copyPrompt = sheet_api_copy_prompt_for_token($project);
     $stmt = db()->prepare(
         'SELECT c.id, c.file_path, c.selector, c.body, c.sheet_status, c.desired_due_at, c.ai_check_status, c.ai_check_summary, c.ai_checked_at, c.ai_check_provider, c.ai_check_model, c.resolved_at, c.confirmation_pending_at, c.created_at, u.name AS user_name
            FROM ' . table_name('comments') . ' c
@@ -60,14 +190,18 @@ function sheet_api_comment_rows(int $projectId): array
           WHERE c.project_id = ? AND c.parent_id IS NULL
           ORDER BY c.file_path ASC, c.created_at ASC, c.id ASC'
     );
-    $stmt->execute([$projectId]);
-
     $comments = [];
-    foreach ($stmt->fetchAll() as $row) {
+    $stmt->execute([$projectId]);
+    $rows = $stmt->fetchAll();
+    $attachmentsByComment = sheet_api_comment_attachment_map(array_column($rows, 'id'));
+    foreach ($rows as $row) {
         $status = $row['resolved_at'] !== null ? 'done' : ($row['confirmation_pending_at'] !== null ? 'pending' : sheet_api_status((string) ($row['sheet_status'] ?? 'todo')));
+        if ($statusFilter !== null && !in_array($status, $statusFilter, true)) {
+            continue;
+        }
         $filePath = (string) $row['file_path'];
         $selector = (string) ($row['selector'] ?? '');
-        $comments[] = [
+        $comment = [
             'id' => (int) $row['id'],
             'file_path' => $filePath,
             'selector' => $selector,
@@ -90,6 +224,11 @@ function sheet_api_comment_rows(int $projectId): array
             'created_at' => $row['created_at'],
             'user_name' => $row['user_name'] ?: 'ゲスト',
         ];
+        $attachments = $attachmentsByComment[(int) $row['id']] ?? [];
+        $comment['attachments'] = $attachments;
+        $comment['attachment_paths'] = array_map(static fn (array $attachment): string => (string) $attachment['path'], $attachments);
+        $comment['response_prompt'] = sheet_api_response_prompt($comment, $fileCopyTargets, $copyPrompt);
+        $comments[] = sheet_api_apply_fields($comment, $fields);
     }
     return $comments;
 }
@@ -191,6 +330,7 @@ try {
     $stmt->execute([(int) $project['api_token_id']]);
 
     if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+        $comments = sheet_api_comment_rows($project, sheet_api_status_filter_from_request(), sheet_api_fields_from_request());
         sheet_api_response([
             'ok' => true,
             'project' => [
@@ -198,7 +338,7 @@ try {
                 'title' => $project['title'],
             ],
             'files' => sheet_api_files($project),
-            'comments' => sheet_api_comment_rows((int) $project['id']),
+            'comments' => $comments,
         ]);
     }
 
@@ -239,7 +379,7 @@ try {
     sheet_api_response([
         'ok' => true,
         'updated' => count($updates),
-        'comments' => sheet_api_comment_rows((int) $project['id']),
+        'comments' => sheet_api_comment_rows($project),
     ]);
 } catch (Throwable $e) {
     sheet_api_response(['ok' => false, 'message' => $e->getMessage()], 400);
