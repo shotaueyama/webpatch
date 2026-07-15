@@ -3,34 +3,34 @@
 require __DIR__ . '/_app.php';
 
 $token = (string) ($_GET['token'] ?? '');
-$project = public_project_for_token($token);
+$project = client_project_for_token($token);
 
 header('X-Robots-Tag: noindex, nofollow, noarchive');
 
 if ($project === null) {
     http_response_code(404);
     header('Content-Type: text/plain; charset=UTF-8');
-    exit('公開リンクが無効です。');
+    exit('クライアント共有リンクが無効です。');
 }
 
 $files = project_sidebar_html_files($project);
 $fileTitles = project_file_display_titles($project, $files);
 $fileCopyTargets = project_file_copy_targets($project, $files);
-$pageCommentMarkerStates = page_comment_marker_states_for_project((int) $project['id'], null, true);
+$pageCommentMarkerStates = page_comment_marker_states_for_project((int) $project['id'], (int) $project['client_share_id']);
 
 $activeFile = (string) ($_GET['file'] ?? $project['entry_file']);
 if (!in_array($activeFile, $files, true)) {
     $activeFile = $files[0] ?? (string) $project['entry_file'];
 }
 $activeFileTitle = $fileTitles[$activeFile] ?? (pathinfo($activeFile, PATHINFO_FILENAME) ?: $activeFile);
-$previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file=' . rawurlencode($activeFile));
+$previewUrl = base_url('public-preview?client_token=' . rawurlencode($token) . '&file=' . rawurlencode($activeFile));
 ?><!doctype html>
 <html lang="ja">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="robots" content="noindex,nofollow,noarchive">
-    <title><?= h($project['title']) ?> | WebPatch 公開コメント</title>
+    <title><?= h($project['title']) ?> | WebPatch クライアント共有</title>
     <link rel="icon" type="image/svg+xml" href="<?= h(base_url('favicon.svg')) ?>">
     <link rel="stylesheet" href="<?= h(base_url('styles.css')) ?>">
   </head>
@@ -46,7 +46,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
             <svg class="header-button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.5 5.75h11A3.25 3.25 0 0 1 20.75 9v5.25a3.25 3.25 0 0 1-3.25 3.25h-4.28l-4.13 3.1a.85.85 0 0 1-1.36-.68V17.5H6.5a3.25 3.25 0 0 1-3.25-3.25V9A3.25 3.25 0 0 1 6.5 5.75Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
             <span>コメント</span>
           </button>
-          <span class="project-badge">ゲストコメント</span>
+          <span class="project-badge">クライアント共有</span>
         </div>
       </header>
       <main class="app-main project-main">
@@ -81,7 +81,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
               <div class="file-list">
                 <?php foreach ($files as $file): ?>
                   <?php $pageMarker = $pageCommentMarkerStates[$file] ?? null; ?>
-                  <a class="<?= $file === $activeFile ? 'active' : '' ?>" href="<?= h(base_url('public-project.php?token=' . rawurlencode($token) . '&file=' . rawurlencode($file))) ?>">
+                  <a class="<?= $file === $activeFile ? 'active' : '' ?>" href="<?= h(base_url('client-project?token=' . rawurlencode($token) . '&file=' . rawurlencode($file))) ?>">
                     <span class="file-list-title">
                       <span><?= h($fileTitles[$file] ?? $file) ?></span>
                       <?php if ($pageMarker !== null): ?>
@@ -102,7 +102,6 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
               <div class="comment-panel">
                 <div class="comment-panel-heading">
                   <h2>コメント</h2>
-                  <a class="comment-sheet-button" href="<?= h(base_url('comment-sheet.php?token=' . rawurlencode($token))) ?>" target="_blank" rel="noopener noreferrer">シート</a>
                 </div>
                 <div class="comment-list" data-comment-list aria-label="コメント一覧"></div>
               </div>
@@ -202,7 +201,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
           tablet: { width: 768, height: 1024 },
           mobile: { width: 390, height: 693 }
         };
-        const storageKey = 'webpatch-public-preview-mode';
+        const storageKey = 'webpatch-client-preview-mode';
 
         if (!stage || buttons.length === 0) {
           return;
@@ -331,7 +330,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
         let commentMode = true;
         let hoverTarget = null;
         const showToast = (message, type = 'success') => window.webpatchShowToast && window.webpatchShowToast(message, type);
-        const guestKeyStorage = 'webpatch-public-guest-key';
+        const guestKeyStorage = `webpatch-client-guest-key-${token}`;
         const randomGuestKey = () => {
           const bytes = new Uint8Array(24);
           if (window.crypto && window.crypto.getRandomValues) {
@@ -437,7 +436,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
         const publicPageUrl = (file, commentId = '') => {
           const params = new URLSearchParams({ token, file });
           if (commentId) params.set('comment', String(commentId));
-          return `<?= h(base_url('public-project.php')) ?>?${params.toString()}`;
+          return `<?= h(base_url('client-project')) ?>?${params.toString()}`;
         };
         const navigateToThreadPage = (thread) => {
           const file = resolveThreadFile(thread);
@@ -564,7 +563,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
             gallery.className = 'comment-image-gallery';
             comment.images.forEach((image) => {
               const link = document.createElement('a');
-              link.href = `${commentImageBaseUrl}?id=${encodeURIComponent(image.id)}&token=${encodeURIComponent(token)}`;
+              link.href = `${commentImageBaseUrl}?id=${encodeURIComponent(image.id)}&client_token=${encodeURIComponent(token)}`;
               link.target = '_blank';
               link.rel = 'noopener noreferrer';
               link.addEventListener('click', (event) => event.stopPropagation());
@@ -598,7 +597,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
           threadBody.replaceChildren(buildMessage(thread, thread), ...thread.replies.map((reply) => buildMessage(reply, thread)));
           threadBody.classList.toggle('resolved', Boolean(thread.is_resolved));
           replyForm.reset();
-          replyForm.elements.guest_name.value = localStorage.getItem('webpatch-public-guest-name') || 'ゲスト';
+          replyForm.elements.guest_name.value = localStorage.getItem('webpatch-client-guest-name') || 'ゲスト';
           replyLabel.textContent = '返信';
           submitButton.textContent = '返信する';
           if (resolveButton) {
@@ -628,7 +627,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
           threadBody.replaceChildren();
           threadBody.classList.remove('resolved');
           replyForm.reset();
-          replyForm.elements.guest_name.value = localStorage.getItem('webpatch-public-guest-name') || 'ゲスト';
+          replyForm.elements.guest_name.value = localStorage.getItem('webpatch-client-guest-name') || 'ゲスト';
           replyLabel.textContent = 'コメント';
           submitButton.textContent = 'コメントする';
           if (resolveButton) {
@@ -657,7 +656,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
           threadBody.replaceChildren();
           threadBody.classList.remove('resolved');
           replyForm.reset();
-          replyForm.elements.guest_name.value = localStorage.getItem('webpatch-public-guest-name') || 'ゲスト';
+          replyForm.elements.guest_name.value = localStorage.getItem('webpatch-client-guest-name') || 'ゲスト';
           replyForm.elements.body.value = comment.body || '';
           replyLabel.textContent = 'コメント';
           submitButton.textContent = '保存する';
@@ -1049,7 +1048,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
           const target = `${fileCopyTargets[file] || file} の ${thread.selector || ''}`;
           const attachmentLines = Array.isArray(comment.images)
             ? comment.images
-                .map((image) => image && image.id ? `#添付 ${new URL(`${commentImageBaseUrl}?id=${encodeURIComponent(image.id)}&token=${encodeURIComponent(token)}`, window.location.origin).toString()}` : '')
+                .map((image) => image && image.id ? `#添付 ${new URL(`${commentImageBaseUrl}?id=${encodeURIComponent(image.id)}&client_token=${encodeURIComponent(token)}`, window.location.origin).toString()}` : '')
                 .filter(Boolean)
             : [];
           return [`#対象 : ${target}`, `#コメント : ${comment.body || ''}`, ...attachmentLines].join('\n');
@@ -1089,7 +1088,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
         };
         const loadComments = async () => {
           const params = new URLSearchParams({ token, file: activeFile, guest_key: guestKey });
-          const response = await fetch(`<?= h(base_url('public-comments.php')) ?>?${params.toString()}`, { headers: { 'Accept': 'application/json' } });
+          const response = await fetch(`<?= h(base_url('client-comments')) ?>?${params.toString()}`, { headers: { 'Accept': 'application/json' } });
           const result = await response.json();
           if (!response.ok || !result.ok) throw new Error(result.message || 'コメントを読み込めませんでした。');
           threads = (result.threads || []).filter(isCurrentFileThread);
@@ -1114,7 +1113,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
             throw new Error('現在の表示ページを特定できないため、コメントを保存できません。ページを再読み込みしてください。');
           }
           const guestName = replyForm.elements.guest_name.value.trim() || 'ゲスト';
-          localStorage.setItem('webpatch-public-guest-name', guestName);
+          localStorage.setItem('webpatch-client-guest-name', guestName);
           const imageInput = replyForm.querySelector('[data-comment-images]');
           const imageFiles = imageInput ? Array.from(imageInput.files || []) : [];
           const hasImages = imageFiles.length > 0;
@@ -1132,7 +1131,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
             requestOptions.headers['Content-Type'] = 'application/json';
             requestOptions.body = JSON.stringify(basePayload);
           }
-          const response = await fetch('<?= h(base_url('public-comments.php')) ?>', requestOptions);
+          const response = await fetch('<?= h(base_url('client-comments')) ?>', requestOptions);
           const result = await response.json();
           if (!response.ok || !result.ok) throw new Error(result.message || 'コメントを保存できませんでした。');
           threads = (result.threads || []).filter(isCurrentFileThread);
@@ -1159,7 +1158,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
         };
         const performDeleteComment = async (comment) => {
           try {
-            const response = await fetch('<?= h(base_url('public-comments.php')) ?>', {
+            const response = await fetch('<?= h(base_url('client-comments')) ?>', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
               body: JSON.stringify({
@@ -1201,7 +1200,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
           const targetFile = resolveThreadFile(thread) || activeFile;
           resolveButton.disabled = true;
           try {
-            const response = await fetch('<?= h(base_url('public-comments.php')) ?>', {
+            const response = await fetch('<?= h(base_url('client-comments')) ?>', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',

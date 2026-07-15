@@ -3,7 +3,10 @@
 require __DIR__ . '/_app.php';
 
 $token = (string) ($_GET['token'] ?? '');
-$project = public_project_for_token($token);
+$clientToken = (string) ($_GET['client_token'] ?? '');
+$isClientToken = $token === '' && $clientToken !== '';
+$effectiveToken = $isClientToken ? $clientToken : $token;
+$project = $isClientToken ? client_project_for_token($clientToken) : public_project_for_token($token);
 
 header('X-Robots-Tag: noindex, nofollow, noarchive');
 
@@ -15,7 +18,8 @@ if ($project === null) {
 try {
     $file = normalize_zip_path((string) ($_GET['file'] ?? ''));
     if (is_html_file($file)) {
-        header('Location: ' . base_url('public-preview.php?token=' . rawurlencode($token) . '&file=' . rawurlencode($file)), true, 302);
+        $tokenKey = $isClientToken ? 'client_token' : 'token';
+        header('Location: ' . base_url('public-preview?' . $tokenKey . '=' . rawurlencode($effectiveToken) . '&file=' . rawurlencode($file)), true, 302);
         exit;
     }
 
@@ -50,13 +54,14 @@ try {
 
     if ($extension === 'css') {
         $css = (string) file_get_contents($path);
-        $css = preg_replace_callback('/url\\(([^)]+)\\)/i', static function (array $matches) use ($project, $file, $token): string {
+        $css = preg_replace_callback('/url\\(([^)]+)\\)/i', static function (array $matches) use ($project, $file, $effectiveToken, $isClientToken): string {
             $raw = trim($matches[1], " \t\n\r\0\x0B'\"");
             if ($raw === '' || preg_match('/^(?:https?:|data:|blob:|#)/i', $raw)) {
                 return $matches[0];
             }
             $resolved = resolve_relative_file($file, $raw);
-            return 'url("' . base_url('public-asset.php?token=' . rawurlencode($token) . '&file=' . rawurlencode($resolved)) . '")';
+            $tokenKey = $isClientToken ? 'client_token' : 'token';
+            return 'url("' . base_url('public-asset?' . $tokenKey . '=' . rawurlencode($effectiveToken) . '&file=' . rawurlencode($resolved)) . '")';
         }, $css) ?? $css;
         echo $css;
         exit;

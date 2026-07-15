@@ -34,6 +34,7 @@ if ($project === null) {
 }
 
 ensure_comment_ai_check_columns();
+ensure_comment_client_share_column();
 
 $canManageApi = $user !== null && user_owns_project($project, (int) $user['id']);
 $apiTokenMeta = $canManageApi ? comment_sheet_api_token_meta((int) $project['id']) : null;
@@ -167,26 +168,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-$files = [];
-$root = project_root($project);
-$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS));
-foreach ($iterator as $file) {
-    if ($file->isFile()) {
-        $relative = ltrim(str_replace($root, '', $file->getPathname()), '/');
-        if (is_html_file($relative)) {
-            $files[] = $relative;
-        }
-    }
-}
-sort($files);
+$files = project_sidebar_html_files($project);
 $fileCopyTargets = project_file_copy_targets($project, $files);
 
 ensure_comment_confirmation_columns();
+$commentWhere = 'WHERE c.project_id = ? AND c.parent_id IS NULL';
+if ($publicToken !== '') {
+    $commentWhere .= ' AND c.client_share_id IS NULL';
+}
 $stmt = db()->prepare(
     'SELECT c.id, c.file_path, c.selector, c.body, c.sheet_status, c.desired_due_at, c.ai_check_status, c.ai_check_summary, c.ai_checked_at, c.ai_check_provider, c.ai_check_model, c.resolved_at, c.confirmation_pending_at, c.created_at, u.name AS user_name
        FROM ' . table_name('comments') . ' c
        LEFT JOIN ' . table_name('users') . ' u ON u.id = c.user_id
-      WHERE c.project_id = ? AND c.parent_id IS NULL
+      ' . $commentWhere . '
       ORDER BY c.file_path ASC, c.created_at ASC, c.id ASC'
 );
 $stmt->execute([(int) $project['id']]);

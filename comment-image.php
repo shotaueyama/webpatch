@@ -4,6 +4,7 @@ require __DIR__ . '/_app.php';
 
 $imageId = (int) ($_GET['id'] ?? 0);
 $token = (string) ($_GET['token'] ?? '');
+$clientToken = (string) ($_GET['client_token'] ?? '');
 
 if ($imageId <= 0) {
     http_response_code(404);
@@ -11,7 +12,7 @@ if ($imageId <= 0) {
 }
 
 $stmt = db()->prepare(
-    'SELECT ci.*, c.project_id
+    'SELECT ci.*, c.project_id, c.client_share_id
        FROM ' . table_name('comment_images') . ' ci
        INNER JOIN ' . table_name('comments') . ' c ON c.id = ci.comment_id
       WHERE ci.id = ?
@@ -28,7 +29,14 @@ if (!$image) {
 $allowed = false;
 if ($token !== '') {
     $project = public_project_for_token($token);
-    $allowed = $project !== null && (int) $project['id'] === (int) $image['project_id'];
+    $allowed = $project !== null
+        && (int) $project['id'] === (int) $image['project_id']
+        && ($image['client_share_id'] === null || $image['client_share_id'] === '');
+} elseif ($clientToken !== '') {
+    $project = client_project_for_token($clientToken);
+    $allowed = $project !== null
+        && (int) $project['id'] === (int) $image['project_id']
+        && (int) $project['client_share_id'] === (int) ($image['client_share_id'] ?? 0);
 } else {
     $apiToken = trim((string) ($_SERVER['HTTP_X_WEBPATCH_API_TOKEN'] ?? ''));
     if ($apiToken === '') {

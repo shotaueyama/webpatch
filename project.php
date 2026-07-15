@@ -19,6 +19,7 @@ $canEdit = !$isUrlSource && project_role_allows_edit($project, (int) $user['id']
 $canRefreshUrl = $isUrlSource && project_role_allows_edit($project, (int) $user['id']);
 $sharedUsers = $canManageProject ? shared_users_for_project((int) $project['id']) : [];
 $publicLink = $canManageProject ? public_link_for_project((int) $project['id']) : null;
+$clientLinks = $canManageProject ? client_links_for_project((int) $project['id']) : [];
 $copyPrompt = project_copy_prompt_for_user((int) $project['id'], (int) $user['id']);
 $projectGitSettings = project_git_settings($project);
 $savedBasicAuth = null;
@@ -26,32 +27,25 @@ if ($isUrlSource) {
     $savedBasicAuth = url_project_saved_basic_auth(url_project_map($project));
 }
 
-$files = [];
-$root = project_root($project);
-$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS));
-foreach ($iterator as $file) {
-    if ($file->isFile()) {
-        $relative = ltrim(str_replace($root, '', $file->getPathname()), '/');
-        if (is_html_file($relative)) {
-            $files[] = $relative;
-        }
-    }
-}
-sort($files);
+$files = project_sidebar_html_files($project);
 $fileTitles = project_file_display_titles($project, $files);
 $fileCopyTargets = project_file_copy_targets($project, $files);
 $pageCommentMarkerStates = page_comment_marker_states_for_project((int) $project['id']);
 
 $activeFile = (string) ($_GET['file'] ?? $project['entry_file']);
 if (!in_array($activeFile, $files, true)) {
-    $activeFile = $project['entry_file'];
+    $activeFile = $files[0] ?? (string) $project['entry_file'];
 }
 $canDeletePage = project_role_allows_edit($project, (int) $user['id']) && count($files) > 1;
 $canDeleteProject = user_owns_project($project, (int) $user['id']);
+$canReorderPages = project_role_allows_edit($project, (int) $user['id']) && count($files) > 1;
 $activeFileTitle = $fileTitles[$activeFile] ?? (pathinfo($activeFile, PATHINFO_FILENAME) ?: $activeFile);
 $publicLinkUrl = ($publicLink !== null && (int) $publicLink['enabled'] === 1)
     ? public_project_url((string) $publicLink['token'], $activeFile)
     : '';
+$clientLinkPayloads = $canManageProject
+    ? array_map(static fn (array $link): array => client_link_row_payload($link, $project), $clientLinks)
+    : [];
 $projectPublicRef = project_public_ref($project);
 $previewUrl = base_url('preview.php?id=' . rawurlencode($projectPublicRef) . '&file=' . rawurlencode($activeFile));
 $iconReset = '<svg class="header-button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.35 8.15A6.65 6.65 0 1 1 6.2 13.9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M7.35 4.65v3.5h-3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -105,10 +99,10 @@ ob_start();
           <span><?= h($activeFile) ?></span>
         </div>
       </div>
-      <div class="file-list">
+      <div class="file-list <?= $canReorderPages ? 'reorderable' : '' ?>" <?= $canReorderPages ? 'data-page-order-list' : '' ?>>
         <?php foreach ($files as $file): ?>
           <?php $pageMarker = $pageCommentMarkerStates[$file] ?? null; ?>
-          <a class="<?= $file === $activeFile ? 'active' : '' ?>" href="<?= h(base_url(project_path($project, $file))) ?>">
+          <a class="<?= $file === $activeFile ? 'active' : '' ?>" href="<?= h(base_url(project_path($project, $file))) ?>" data-page-file="<?= h($file) ?>" <?= $canReorderPages ? 'draggable="true"' : '' ?>>
             <span class="file-list-title">
               <span><?= h($fileTitles[$file] ?? $file) ?></span>
               <?php if ($pageMarker !== null): ?>
@@ -239,6 +233,18 @@ ob_start();
         <button class="secondary-button" type="button" data-public-link-action="regenerate">再発行</button>
         <button class="secondary-button danger" type="button" data-public-link-action="disable">無効化</button>
       </div>
+    </div>
+    <div class="public-share-panel client-share-panel">
+      <h3>クライアント共有リンク</h3>
+      <p>このリンクでは、そのクライアントリンク経由で投稿されたコメントだけを表示します。ログイン不要で使えます。</p>
+      <form class="client-link-create-form" data-client-link-form>
+        <div class="field">
+          <label for="client_link_label">表示名</label>
+          <input id="client_link_label" name="label" type="text" maxlength="160" placeholder="A社確認用" required>
+        </div>
+        <button class="secondary-button" type="submit">リンクを発行</button>
+      </form>
+      <div class="client-link-list" data-client-link-list></div>
     </div>
     <div class="share-members">
       <h3>共有中のメンバー</h3>
@@ -463,6 +469,131 @@ ob_start();
     } else {
       mobileQuery.addListener(syncFilePanelPlacement);
     }
+  })();
+
+  (() => {
+    const list = document.querySelector('[data-page-order-list]');
+    if (!list) {
+      return;
+    }
+
+    const csrfToken = <?= json_encode(csrf_token(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+    const projectId = <?= json_encode($projectPublicRef, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+    let draggedItem = null;
+    let dragMoved = false;
+    let saveTimer = null;
+
+    const showToast = (message, type = 'success') => {
+      if (window.webpatchShowToast) {
+        window.webpatchShowToast(message, type);
+      }
+    };
+
+    const items = () => Array.from(list.querySelectorAll('[data-page-file]'));
+    const clearDropState = () => {
+      items().forEach((item) => item.classList.remove('drag-before', 'drag-after'));
+    };
+    const currentOrder = () => items().map((item) => item.dataset.pageFile || '').filter(Boolean);
+    const applySavedOrder = (files) => {
+      if (!Array.isArray(files) || files.length === 0) {
+        return;
+      }
+      const itemByFile = new Map(items().map((item) => [item.dataset.pageFile || '', item]));
+      files.forEach((file) => {
+        const item = itemByFile.get(file);
+        if (item) {
+          list.append(item);
+          itemByFile.delete(file);
+        }
+      });
+      itemByFile.forEach((item) => list.append(item));
+    };
+    const saveOrder = () => {
+      window.clearTimeout(saveTimer);
+      saveTimer = window.setTimeout(async () => {
+        list.classList.add('saving');
+        try {
+          const response = await fetch('<?= h(base_url('save-page-order')) ?>', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json'
+            },
+            body: JSON.stringify({
+              csrf_token: csrfToken,
+              project_id: projectId,
+              files: currentOrder()
+            })
+          });
+          const result = await response.json();
+          if (!response.ok || !result.ok) {
+            throw new Error(result.message || 'ページ順を保存できませんでした。');
+          }
+          applySavedOrder(result.files || []);
+          showToast(result.message || 'ページ順を保存しました。', 'success');
+        } catch (error) {
+          showToast(error.message || 'ページ順を保存できませんでした。', 'error');
+        } finally {
+          list.classList.remove('saving');
+        }
+      }, 160);
+    };
+    const dropPosition = (event, target) => {
+      const rect = target.getBoundingClientRect();
+      return event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+    };
+
+    items().forEach((item) => {
+      item.addEventListener('dragstart', (event) => {
+        draggedItem = item;
+        dragMoved = false;
+        item.classList.add('dragging');
+        event.dataTransfer.effectAllowed = 'move';
+        event.dataTransfer.setData('text/plain', item.dataset.pageFile || '');
+      });
+      item.addEventListener('dragenter', (event) => {
+        if (!draggedItem || item === draggedItem) {
+          return;
+        }
+        event.preventDefault();
+      });
+      item.addEventListener('dragover', (event) => {
+        if (!draggedItem || item === draggedItem) {
+          return;
+        }
+        event.preventDefault();
+        clearDropState();
+        item.classList.add(dropPosition(event, item) === 'before' ? 'drag-before' : 'drag-after');
+      });
+      item.addEventListener('drop', (event) => {
+        if (!draggedItem || item === draggedItem) {
+          return;
+        }
+        event.preventDefault();
+        const position = dropPosition(event, item);
+        if (position === 'before') {
+          list.insertBefore(draggedItem, item);
+        } else {
+          list.insertBefore(draggedItem, item.nextSibling);
+        }
+        dragMoved = true;
+        clearDropState();
+        saveOrder();
+      });
+      item.addEventListener('dragend', () => {
+        item.classList.remove('dragging');
+        clearDropState();
+        window.setTimeout(() => {
+          draggedItem = null;
+          dragMoved = false;
+        }, 250);
+      });
+      item.addEventListener('click', (event) => {
+        if (dragMoved) {
+          event.preventDefault();
+        }
+      });
+    });
   })();
 
   (() => {
@@ -1445,6 +1576,9 @@ ob_start();
         const page = document.createElement('span');
         page.className = 'comment-page-label';
         page.textContent = displayFileLabel(thread.file_path || activeFile);
+        const clientLabel = document.createElement('span');
+        clientLabel.className = 'comment-client-label';
+        clientLabel.textContent = thread.client_share_label ? `クライアント: ${thread.client_share_label}` : '';
         const body = document.createElement('small');
         body.textContent = thread.body;
         const count = document.createElement('span');
@@ -1471,9 +1605,13 @@ ob_start();
           const status = document.createElement('span');
           status.className = 'comment-status-label';
           status.textContent = thread.is_resolved ? '解決済み' : 'ピン未検出';
-          button.append(label, status, page, body, count, actions);
+          button.append(label, status, page);
+          if (thread.client_share_label) button.append(clientLabel);
+          button.append(body, count, actions);
         } else {
-          button.append(label, page, body, count, actions);
+          button.append(label, page);
+          if (thread.client_share_label) button.append(clientLabel);
+          button.append(body, count, actions);
         }
         button.addEventListener('click', () => {
           activateCommentFromList(thread);
@@ -2555,7 +2693,10 @@ ob_start();
     const publicLinkInput = document.querySelector('[data-public-link-url]');
     const publicLinkButtons = Array.from(document.querySelectorAll('[data-public-link-action]'));
     const publicLinkCopy = document.querySelector('[data-public-link-copy]');
+    const clientLinkForm = document.querySelector('[data-client-link-form]');
+    const clientLinkList = document.querySelector('[data-client-link-list]');
     const roleSelects = Array.from(document.querySelectorAll('[data-share-role-user]'));
+    let clientLinks = <?= json_encode($clientLinkPayloads, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
 
     if (!shareToggle || !modal || !form) {
       return;
@@ -2591,6 +2732,118 @@ ob_start();
       }
     };
 
+    const copyText = async (text, fallbackInput = null) => {
+      if (!text) {
+        throw new Error('コピーするリンクがありません。');
+      }
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch (error) {
+        if (fallbackInput) {
+          fallbackInput.focus();
+          fallbackInput.select();
+        }
+        throw error;
+      }
+    };
+
+    const renderClientLinks = () => {
+      if (!clientLinkList) {
+        return;
+      }
+      clientLinkList.replaceChildren();
+      if (!Array.isArray(clientLinks) || clientLinks.length === 0) {
+        const empty = document.createElement('p');
+        empty.className = 'share-empty';
+        empty.textContent = 'まだクライアント共有リンクはありません。';
+        clientLinkList.append(empty);
+        return;
+      }
+
+      clientLinks.forEach((link) => {
+        const card = document.createElement('div');
+        card.className = 'client-link-card';
+        const header = document.createElement('div');
+        header.className = 'client-link-card-header';
+        const title = document.createElement('strong');
+        title.textContent = link.label || 'クライアント共有';
+        const status = document.createElement('span');
+        status.className = `client-link-status${link.enabled ? '' : ' disabled'}`;
+        status.textContent = link.enabled ? '有効' : '無効';
+        header.append(title, status);
+
+        const row = document.createElement('div');
+        row.className = 'public-link-row';
+        const input = document.createElement('input');
+        input.type = 'text';
+        input.readOnly = true;
+        input.value = link.url || '';
+        input.placeholder = 'リンクが無効です';
+        const copyButton = document.createElement('button');
+        copyButton.className = 'secondary-button';
+        copyButton.type = 'button';
+        copyButton.textContent = 'コピー';
+        copyButton.disabled = !link.url || !link.enabled;
+        copyButton.addEventListener('click', async () => {
+          try {
+            await copyText(input.value, input);
+            showToast('クライアント共有リンクをコピーしました。', 'success');
+          } catch (error) {
+            setResult('リンクを選択しました。コピーしてください。', 'success');
+          }
+        });
+        row.append(input, copyButton);
+
+        const actions = document.createElement('div');
+        actions.className = 'client-link-actions';
+        [
+          ['regenerate', '再発行', 'secondary-button'],
+          ['disable', '無効化', 'secondary-button danger'],
+          ['delete', '削除', 'secondary-button danger']
+        ].forEach(([action, label, className]) => {
+          const button = document.createElement('button');
+          button.className = className;
+          button.type = 'button';
+          button.textContent = label;
+          button.dataset.clientLinkAction = action;
+          button.addEventListener('click', () => updateClientLink(action, link.id, button));
+          actions.append(button);
+        });
+        card.append(header, row, actions);
+        clientLinkList.append(card);
+      });
+    };
+
+    const updateClientLink = async (action, linkId = 0, button = null, label = '') => {
+      const body = new FormData();
+      body.set('csrf_token', <?= json_encode(csrf_token(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>);
+      body.set('project_id', <?= json_encode($projectPublicRef, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>);
+      body.set('action', action);
+      if (linkId) body.set('link_id', String(linkId));
+      if (label) body.set('label', label);
+      if (button) button.disabled = true;
+      try {
+        const response = await fetch('<?= h(base_url('client-link')) ?>', {
+          method: 'POST',
+          headers: { 'Accept': 'application/json' },
+          body
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) {
+          throw new Error(result.message || 'クライアント共有リンクを更新できませんでした。');
+        }
+        clientLinks = result.links || [];
+        renderClientLinks();
+        setResult(result.message || 'クライアント共有リンクを更新しました。', 'success');
+        showToast(result.message || 'クライアント共有リンクを更新しました。', 'success');
+      } catch (error) {
+        setResult(error.message || 'クライアント共有リンクを更新できませんでした。', 'error');
+        showToast(error.message || 'クライアント共有リンクを更新できませんでした。', 'error');
+      } finally {
+        if (button) button.disabled = false;
+      }
+    };
+
     const openModal = () => {
       modal.hidden = false;
       setResult('');
@@ -2607,6 +2860,7 @@ ob_start();
     };
 
     shareToggle.addEventListener('click', openModal);
+    renderClientLinks();
     if (closeButton) {
       closeButton.addEventListener('click', closeModal);
     }
@@ -2728,6 +2982,23 @@ ob_start();
           publicLinkInput.select();
           setResult('リンクを選択しました。コピーしてください。', 'success');
         }
+      });
+    }
+
+    if (clientLinkForm) {
+      clientLinkForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const input = clientLinkForm.querySelector('input[name="label"]');
+        const submitButton = clientLinkForm.querySelector('button[type="submit"]');
+        const label = input ? input.value.trim() : '';
+        if (!label) {
+          setResult('クライアント共有リンク名を入力してください。', 'error');
+          return;
+        }
+        if (submitButton) submitButton.disabled = true;
+        await updateClientLink('create', 0, null, label);
+        if (input) input.value = '';
+        if (submitButton) submitButton.disabled = false;
       });
     }
   })();

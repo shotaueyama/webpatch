@@ -409,26 +409,178 @@ function project_html_files(array $project): array
     return $files;
 }
 
+function is_project_sidebar_page_file(string $path): bool
+{
+    $normalized = str_replace('\\', '/', trim($path));
+    if (!is_html_file($normalized)) {
+        return false;
+    }
+
+    $segments = array_values(array_filter(explode('/', strtolower($normalized)), static fn (string $segment): bool => $segment !== ''));
+    $excludedDirs = ['components', 'component', 'partials', 'partial', 'includes', 'include', 'templates', 'template'];
+    foreach (array_slice($segments, 0, -1) as $segment) {
+        if (in_array($segment, $excludedDirs, true)) {
+            return false;
+        }
+    }
+
+    $basename = basename($normalized);
+    return !str_starts_with($basename, '_');
+}
+
+function project_sidebar_html_files(array $project): array
+{
+    $files = array_values(array_filter(
+        project_html_files($project),
+        static fn (string $file): bool => is_project_sidebar_page_file($file)
+    ));
+
+    if ($files === [] && !empty($project['entry_file']) && is_html_file((string) $project['entry_file'])) {
+        $files[] = (string) $project['entry_file'];
+    }
+
+    return apply_project_page_order($project, $files);
+}
+
+function project_webpatch_metadata_dir(array $project): string
+{
+    return project_root($project) . '/_webpatch';
+}
+
+function project_page_order_path(array $project): string
+{
+    return project_webpatch_metadata_dir($project) . '/page-order.json';
+}
+
+function project_page_order(array $project): array
+{
+    $path = project_page_order_path($project);
+    if (!is_file($path)) {
+        return [];
+    }
+    $data = json_decode((string) file_get_contents($path), true);
+    if (!is_array($data)) {
+        return [];
+    }
+    $order = $data['files'] ?? $data;
+    if (!is_array($order)) {
+        return [];
+    }
+    return array_values(array_filter(array_map('strval', $order), static fn (string $file): bool => $file !== ''));
+}
+
+function apply_project_page_order(array $project, array $files): array
+{
+    $files = array_values(array_unique(array_map('strval', $files)));
+    sort($files);
+    $available = array_fill_keys($files, true);
+    $ordered = [];
+    foreach (project_page_order($project) as $file) {
+        if (isset($available[$file])) {
+            $ordered[] = $file;
+            unset($available[$file]);
+        }
+    }
+    return array_merge($ordered, array_keys($available));
+}
+
+function save_project_page_order(array $project, array $requestedOrder): array
+{
+    $visibleFiles = project_sidebar_html_files($project);
+    $visibleLookup = array_fill_keys($visibleFiles, true);
+    $ordered = [];
+
+    foreach ($requestedOrder as $file) {
+        $file = normalize_zip_path((string) $file);
+        if (isset($visibleLookup[$file])) {
+            $ordered[] = $file;
+            unset($visibleLookup[$file]);
+        }
+    }
+    $ordered = array_merge(array_values(array_unique($ordered)), array_keys($visibleLookup));
+
+    $dir = project_webpatch_metadata_dir($project);
+    if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) {
+        throw new RuntimeException('ページ順の保存ディレクトリを作成できませんでした。');
+    }
+    $path = project_page_order_path($project);
+    $json = json_encode(['files' => $ordered], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    if ($json === false || file_put_contents($path, $json, LOCK_EX) === false) {
+        throw new RuntimeException('ページ順を保存できませんでした。');
+    }
+    chmod($path, 0640);
+
+    return $ordered;
+}
+
+function remap_project_page_order_files(array $oldOrder, array $newHtmlFiles): array
+{
+    if ($oldOrder === [] || $newHtmlFiles === []) {
+        return [];
+    }
+
+    $newFiles = array_values(array_unique(array_map('strval', $newHtmlFiles)));
+    $newFileSet = array_fill_keys($newFiles, true);
+    $byInnerPath = [];
+    foreach ($newFiles as $newFile) {
+        $innerPath = path_without_top_directory($newFile);
+        if ($innerPath === '') {
+            continue;
+        }
+        if (array_key_exists($innerPath, $byInnerPath)) {
+            $byInnerPath[$innerPath] = null;
+            continue;
+        }
+        $byInnerPath[$innerPath] = $newFile;
+    }
+
+    $remapped = [];
+    foreach ($oldOrder as $oldFile) {
+        $oldFile = (string) $oldFile;
+        if (isset($newFileSet[$oldFile])) {
+            $remapped[] = $oldFile;
+            continue;
+        }
+
+        $innerPath = path_without_top_directory($oldFile);
+        $newFile = $byInnerPath[$innerPath] ?? null;
+        if (is_string($newFile)) {
+            $remapped[] = $newFile;
+        }
+    }
+
+    return array_values(array_unique($remapped));
+}
+
 function resolve_comment_file_for_selector(array $project, string $file, string $selector): string
 {
     return $file;
 }
 
-function page_comment_marker_states_for_project(int $projectId): array
+function page_comment_marker_states_for_project(int $projectId, ?int $clientShareId = null, bool $normalOnly = false): array
 {
     ensure_comment_confirmation_columns();
+    ensure_comment_client_share_column();
+    $where = 'WHERE project_id = ?
+            AND parent_id IS NULL
+            AND resolved_at IS NULL';
+    $params = [$projectId];
+    if ($clientShareId !== null) {
+        $where .= ' AND client_share_id = ?';
+        $params[] = $clientShareId;
+    } elseif ($normalOnly) {
+        $where .= ' AND client_share_id IS NULL';
+    }
     $stmt = db()->prepare(
         'SELECT file_path,
                 COUNT(*) AS open_count,
                 SUM(CASE WHEN confirmation_pending_at IS NULL THEN 1 ELSE 0 END) AS needs_attention_count,
                 SUM(CASE WHEN confirmation_pending_at IS NOT NULL THEN 1 ELSE 0 END) AS pending_count
            FROM ' . table_name('comments') . '
-          WHERE project_id = ?
-            AND parent_id IS NULL
-            AND resolved_at IS NULL
+          ' . $where . '
           GROUP BY file_path'
     );
-    $stmt->execute([$projectId]);
+    $stmt->execute($params);
 
     $states = [];
     foreach ($stmt->fetchAll() as $row) {
@@ -602,6 +754,211 @@ function regenerate_public_project_link(int $projectId, int $createdBy): array
 function public_project_url(string $token, string $file = ''): string
 {
     $path = 'public-project.php?token=' . rawurlencode($token);
+    if ($file !== '') {
+        $path .= '&file=' . rawurlencode($file);
+    }
+    return absolute_url($path);
+}
+
+function ensure_project_client_links_table(): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+
+    db()->exec(
+        'CREATE TABLE IF NOT EXISTS ' . table_name('project_client_links') . ' (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            project_id BIGINT UNSIGNED NOT NULL,
+            label VARCHAR(160) NOT NULL,
+            token CHAR(64) NOT NULL,
+            enabled TINYINT(1) NOT NULL DEFAULT 1,
+            created_by BIGINT UNSIGNED NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY project_client_links_token_unique (token),
+            KEY project_client_links_project_enabled_index (project_id, enabled),
+            KEY project_client_links_created_by_index (created_by)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+    );
+
+    $done = true;
+}
+
+function ensure_comment_client_share_column(): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+
+    if (!table_column_exists('comments', 'client_share_id')) {
+        try {
+            db()->exec('ALTER TABLE `' . table_name('comments') . '` ADD COLUMN client_share_id BIGINT UNSIGNED NULL AFTER project_id');
+        } catch (PDOException $e) {
+            if ((int) ($e->errorInfo[1] ?? 0) !== 1060) {
+                throw $e;
+            }
+        }
+    }
+
+    try {
+        db()->exec('ALTER TABLE `' . table_name('comments') . '` ADD INDEX comments_client_share_id_index (client_share_id)');
+    } catch (PDOException $e) {
+        if (!in_array((int) ($e->errorInfo[1] ?? 0), [1061, 1068], true)) {
+            throw $e;
+        }
+    }
+
+    $done = true;
+}
+
+function normalize_client_link_label(string $label): string
+{
+    $label = trim($label);
+    if ($label === '') {
+        throw new RuntimeException('クライアント共有リンク名を入力してください。');
+    }
+    return mb_substr($label, 0, 160);
+}
+
+function client_link_row_payload(array $link, array $project): array
+{
+    $files = project_sidebar_html_files($project);
+    $file = $files[0] ?? (string) ($project['entry_file'] ?? '');
+    return [
+        'id' => (int) $link['id'],
+        'label' => (string) $link['label'],
+        'enabled' => (int) $link['enabled'] === 1,
+        'url' => client_project_url((string) $link['token'], $file),
+        'created_at' => $link['created_at'] ?? null,
+        'updated_at' => $link['updated_at'] ?? null,
+    ];
+}
+
+function client_links_for_project(int $projectId): array
+{
+    ensure_project_client_links_table();
+    $stmt = db()->prepare(
+        'SELECT *
+           FROM ' . table_name('project_client_links') . '
+          WHERE project_id = ?
+          ORDER BY created_at DESC, id DESC'
+    );
+    $stmt->execute([$projectId]);
+    return $stmt->fetchAll();
+}
+
+function client_project_for_token(string $token): ?array
+{
+    ensure_project_client_links_table();
+    if (!preg_match('/^[a-f0-9]{64}$/', $token)) {
+        return null;
+    }
+
+    $stmt = db()->prepare(
+        'SELECT p.*, cl.id AS client_share_id, cl.label AS client_share_label, cl.token AS client_token, cl.enabled AS client_link_enabled
+           FROM ' . table_name('project_client_links') . ' cl
+           INNER JOIN ' . table_name('projects') . ' p ON p.id = cl.project_id
+          WHERE cl.token = ? AND cl.enabled = 1
+          LIMIT 1'
+    );
+    $stmt->execute([$token]);
+    $project = $stmt->fetch();
+    return $project ?: null;
+}
+
+function create_project_client_link(int $projectId, string $label, int $createdBy): array
+{
+    ensure_project_client_links_table();
+    $label = normalize_client_link_label($label);
+
+    for ($attempt = 0; $attempt < 5; $attempt++) {
+        try {
+            $token = bin2hex(random_bytes(32));
+            $stmt = db()->prepare(
+                'INSERT INTO ' . table_name('project_client_links') . ' (project_id, label, token, enabled, created_by)
+                 VALUES (?, ?, ?, 1, ?)'
+            );
+            $stmt->execute([$projectId, $label, $token, $createdBy]);
+            break;
+        } catch (PDOException $e) {
+            if ($attempt === 4 || (int) ($e->errorInfo[1] ?? 0) !== 1062) {
+                throw $e;
+            }
+        }
+    }
+
+    $stmt = db()->prepare('SELECT * FROM ' . table_name('project_client_links') . ' WHERE id = ? LIMIT 1');
+    $stmt->execute([(int) db()->lastInsertId()]);
+    $link = $stmt->fetch();
+    if (!$link) {
+        throw new RuntimeException('クライアント共有リンクを作成できませんでした。');
+    }
+    return $link;
+}
+
+function regenerate_project_client_link(int $linkId, int $projectId, int $createdBy): array
+{
+    ensure_project_client_links_table();
+
+    for ($attempt = 0; $attempt < 5; $attempt++) {
+        try {
+            $token = bin2hex(random_bytes(32));
+            $stmt = db()->prepare(
+                'UPDATE ' . table_name('project_client_links') . '
+                    SET token = ?, enabled = 1, created_by = ?
+                  WHERE id = ? AND project_id = ?'
+            );
+            $stmt->execute([$token, $createdBy, $linkId, $projectId]);
+            if ($stmt->rowCount() < 1) {
+                throw new RuntimeException('クライアント共有リンクが見つかりません。');
+            }
+            break;
+        } catch (PDOException $e) {
+            if ($attempt === 4 || (int) ($e->errorInfo[1] ?? 0) !== 1062) {
+                throw $e;
+            }
+        }
+    }
+
+    $stmt = db()->prepare('SELECT * FROM ' . table_name('project_client_links') . ' WHERE id = ? AND project_id = ? LIMIT 1');
+    $stmt->execute([$linkId, $projectId]);
+    $link = $stmt->fetch();
+    if (!$link) {
+        throw new RuntimeException('クライアント共有リンクが見つかりません。');
+    }
+    return $link;
+}
+
+function disable_project_client_link(int $linkId, int $projectId): void
+{
+    ensure_project_client_links_table();
+    $stmt = db()->prepare(
+        'UPDATE ' . table_name('project_client_links') . '
+            SET enabled = 0
+          WHERE id = ? AND project_id = ?'
+    );
+    $stmt->execute([$linkId, $projectId]);
+    if ($stmt->rowCount() < 1) {
+        throw new RuntimeException('クライアント共有リンクが見つかりません。');
+    }
+}
+
+function delete_project_client_link(int $linkId, int $projectId): void
+{
+    ensure_project_client_links_table();
+    $stmt = db()->prepare('DELETE FROM ' . table_name('project_client_links') . ' WHERE id = ? AND project_id = ?');
+    $stmt->execute([$linkId, $projectId]);
+    if ($stmt->rowCount() < 1) {
+        throw new RuntimeException('クライアント共有リンクが見つかりません。');
+    }
+}
+
+function client_project_url(string $token, string $file = ''): string
+{
+    $path = 'client-project?token=' . rawurlencode($token);
     if ($file !== '') {
         $path .= '&file=' . rawurlencode($file);
     }
@@ -2083,6 +2440,7 @@ function delete_project(array $project): void
     ensure_comment_sheet_api_tokens_table();
     ensure_project_user_settings_table();
     ensure_project_git_settings_table();
+    ensure_project_client_links_table();
     ensure_ai_check_jobs_table();
     ensure_comment_thread_reads_table();
 
@@ -2104,6 +2462,7 @@ function delete_project(array $project): void
             'ai_check_jobs',
             'comment_thread_reads',
             'comments',
+            'project_client_links',
             'project_public_links',
             'project_invites',
             'project_shares',
@@ -3322,6 +3681,7 @@ function replace_project_with_zip(array $project, array $file): string
     $userId = (int) $project['user_id'];
     $oldRoot = project_root($project);
     $oldOriginalRoot = original_project_root($project);
+    $oldPageOrder = project_page_order($project);
     $extracted = extract_zip_upload_to_storage($file, $userId);
 
     try {
@@ -3339,6 +3699,12 @@ function replace_project_with_zip(array $project, array $file): string
             (int) $project['id'],
         ]);
         remap_project_comment_file_paths((int) $project['id'], (array) $extracted['html_files']);
+        if ($oldPageOrder !== []) {
+            $newProject = $project;
+            $newProject['entry_file'] = (string) $extracted['entry_file'];
+            $newProject['storage_path'] = (string) $extracted['storage_key'];
+            save_project_page_order($newProject, remap_project_page_order_files($oldPageOrder, (array) $extracted['html_files']));
+        }
         db()->commit();
     } catch (Throwable $e) {
         if (db()->inTransaction()) {

@@ -131,6 +131,8 @@ function comments_payload(int $projectId, ?string $file, int $userId, int $owner
 {
     ensure_comment_confirmation_columns();
     ensure_comment_viewport_column();
+    ensure_comment_client_share_column();
+    ensure_project_client_links_table();
     ensure_comment_thread_reads_table();
     $where = 'WHERE c.project_id = ?';
     $params = [$projectId];
@@ -140,9 +142,10 @@ function comments_payload(int $projectId, ?string $file, int $userId, int $owner
     }
 
     $stmt = db()->prepare(
-        'SELECT c.id, c.file_path, c.selector, c.viewport_mode, c.body, c.parent_id, c.user_id, c.guest_name, c.resolved_at, c.confirmation_pending_at, c.created_at, u.name AS user_name
+        'SELECT c.id, c.file_path, c.selector, c.viewport_mode, c.body, c.parent_id, c.user_id, c.guest_name, c.client_share_id, cl.label AS client_share_label, c.resolved_at, c.confirmation_pending_at, c.created_at, u.name AS user_name
            FROM ' . table_name('comments') . ' c
            LEFT JOIN ' . table_name('users') . ' u ON u.id = c.user_id
+           LEFT JOIN ' . table_name('project_client_links') . ' cl ON cl.id = c.client_share_id
           ' . $where . '
           ORDER BY COALESCE(c.parent_id, c.id) DESC, c.parent_id IS NOT NULL ASC, c.created_at ASC, c.id ASC'
     );
@@ -168,6 +171,8 @@ function comments_payload(int $projectId, ?string $file, int $userId, int $owner
             'is_confirmation_pending' => $row['confirmation_pending_at'] !== null,
             'confirmation_pending_at' => $row['confirmation_pending_at'],
             'user_name' => $row['user_name'] ?: ($row['guest_name'] ?: 'ゲスト'),
+            'client_share_id' => $row['client_share_id'] === null ? null : (int) $row['client_share_id'],
+            'client_share_label' => $row['client_share_label'] ?? '',
             'created_at' => $row['created_at'],
             'images' => $images[(int) $row['id']] ?? [],
         ];

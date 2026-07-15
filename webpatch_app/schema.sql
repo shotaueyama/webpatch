@@ -116,9 +116,30 @@ CREATE TABLE IF NOT EXISTS webpatch_project_public_links (
     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS webpatch_project_client_links (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  project_id BIGINT UNSIGNED NOT NULL,
+  label VARCHAR(160) NOT NULL,
+  token CHAR(64) NOT NULL,
+  enabled TINYINT(1) NOT NULL DEFAULT 1,
+  created_by BIGINT UNSIGNED NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY webpatch_project_client_links_token_unique (token),
+  KEY webpatch_project_client_links_project_enabled_index (project_id, enabled),
+  KEY webpatch_project_client_links_created_by_index (created_by),
+  CONSTRAINT webpatch_project_client_links_project_id_foreign
+    FOREIGN KEY (project_id) REFERENCES webpatch_projects (id)
+    ON DELETE CASCADE,
+  CONSTRAINT webpatch_project_client_links_created_by_foreign
+    FOREIGN KEY (created_by) REFERENCES webpatch_users (id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS webpatch_comments (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   project_id BIGINT UNSIGNED NOT NULL,
+  client_share_id BIGINT UNSIGNED NULL,
   file_path VARCHAR(500) NOT NULL,
   selector VARCHAR(255) NULL,
   viewport_mode VARCHAR(16) NULL,
@@ -137,6 +158,7 @@ CREATE TABLE IF NOT EXISTS webpatch_comments (
   ai_check_model VARCHAR(120) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   KEY webpatch_comments_project_file_index (project_id, file_path),
+  KEY comments_client_share_id_index (client_share_id),
   KEY webpatch_comments_user_id_index (user_id),
   KEY webpatch_comments_parent_id_index (parent_id),
   CONSTRAINT webpatch_comments_project_id_foreign

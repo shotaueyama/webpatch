@@ -3,7 +3,10 @@
 require __DIR__ . '/_app.php';
 
 $token = (string) ($_GET['token'] ?? '');
-$project = public_project_for_token($token);
+$clientToken = (string) ($_GET['client_token'] ?? '');
+$isClientToken = $token === '' && $clientToken !== '';
+$effectiveToken = $isClientToken ? $clientToken : $token;
+$project = $isClientToken ? client_project_for_token($clientToken) : public_project_for_token($token);
 
 header('X-Robots-Tag: noindex, nofollow, noarchive');
 
@@ -19,9 +22,10 @@ try {
         throw new RuntimeException('HTMLファイルではありません。');
     }
 
-    $route = static function (int|string $projectId, string $assetFile, bool $isLink) use ($token): string {
-        $path = is_html_file($assetFile) && $isLink ? 'public-preview.php' : 'public-asset.php';
-        return base_url($path . '?token=' . rawurlencode($token) . '&file=' . rawurlencode($assetFile));
+    $route = static function (int|string $projectId, string $assetFile, bool $isLink) use ($effectiveToken, $isClientToken): string {
+        $path = is_html_file($assetFile) && $isLink ? 'public-preview' : 'public-asset';
+        $tokenKey = $isClientToken ? 'client_token' : 'token';
+        return base_url($path . '?' . $tokenKey . '=' . rawurlencode($effectiveToken) . '&file=' . rawurlencode($assetFile));
     };
 
     header('Content-Type: text/html; charset=UTF-8');

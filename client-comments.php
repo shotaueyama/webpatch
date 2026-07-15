@@ -125,13 +125,13 @@ function public_save_comment_images(int $projectId, int $commentId): void
     }
 }
 
-function public_comments_payload(int $projectId, ?string $file, string $guestKey = ''): array
+function public_comments_payload(int $projectId, int $clientShareId, ?string $file, string $guestKey = ''): array
 {
     ensure_comment_confirmation_columns();
     ensure_comment_viewport_column();
     ensure_comment_client_share_column();
-    $where = 'WHERE c.project_id = ? AND c.client_share_id IS NULL';
-    $params = [$projectId];
+    $where = 'WHERE c.project_id = ? AND c.client_share_id = ?';
+    $params = [$projectId, $clientShareId];
     if ($file !== null) {
         $where .= ' AND c.file_path = ?';
         $params[] = $file;
@@ -202,10 +202,11 @@ try {
         $token = (string) ($_GET['token'] ?? '');
     }
 
-    $project = public_project_for_token($token);
+    $project = client_project_for_token($token);
     if ($project === null) {
-        public_comments_response(['ok' => false, 'message' => '公開リンクが無効です。'], 404);
+        public_comments_response(['ok' => false, 'message' => 'クライアント共有リンクが無効です。'], 404);
     }
+    $clientShareId = (int) $project['client_share_id'];
 
     if ($_SERVER['REQUEST_METHOD'] === 'GET') {
         $fileParam = trim((string) ($_GET['file'] ?? ''));
@@ -218,7 +219,7 @@ try {
             }
         }
         $guestKey = trim((string) ($_GET['guest_key'] ?? ''));
-        public_comments_response(['ok' => true, 'threads' => public_comments_payload((int) $project['id'], $file, $guestKey)]);
+        public_comments_response(['ok' => true, 'threads' => public_comments_payload((int) $project['id'], $clientShareId, $file, $guestKey)]);
     }
 
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -264,10 +265,10 @@ try {
         $stmt = db()->prepare(
             'SELECT id, guest_key, parent_id, selector, viewport_mode, resolved_at, sheet_status, desired_due_at
                FROM ' . table_name('comments') . '
-              WHERE id = ? AND project_id = ? AND file_path = ? AND client_share_id IS NULL
+              WHERE id = ? AND project_id = ? AND client_share_id = ? AND file_path = ?
               LIMIT 1'
         );
-        $stmt->execute([$commentId, (int) $project['id'], $file]);
+        $stmt->execute([$commentId, (int) $project['id'], $clientShareId, $file]);
         $comment = $stmt->fetch();
         if (!$comment) {
             throw new RuntimeException('削除するコメントが見つかりません。');
@@ -276,8 +277,8 @@ try {
             throw new RuntimeException('このコメントは削除できません。');
         }
 
-        $stmt = db()->prepare('SELECT COUNT(*) FROM ' . table_name('comments') . ' WHERE parent_id = ? AND project_id = ? AND file_path = ? AND client_share_id IS NULL');
-        $stmt->execute([$commentId, (int) $project['id'], $file]);
+        $stmt = db()->prepare('SELECT COUNT(*) FROM ' . table_name('comments') . ' WHERE parent_id = ? AND project_id = ? AND client_share_id = ? AND file_path = ?');
+        $stmt->execute([$commentId, (int) $project['id'], $clientShareId, $file]);
         $replyCount = (int) $stmt->fetchColumn();
         $focusId = $comment['parent_id'] === null ? 0 : (int) $comment['parent_id'];
 
@@ -288,11 +289,11 @@ try {
                 $stmt = $pdo->prepare(
                     'SELECT id
                        FROM ' . table_name('comments') . '
-                      WHERE parent_id = ? AND project_id = ? AND file_path = ? AND client_share_id IS NULL
+                      WHERE parent_id = ? AND project_id = ? AND client_share_id = ? AND file_path = ?
                       ORDER BY created_at ASC, id ASC
                       LIMIT 1'
                 );
-                $stmt->execute([$commentId, (int) $project['id'], $file]);
+                $stmt->execute([$commentId, (int) $project['id'], $clientShareId, $file]);
                 $newParentId = (int) $stmt->fetchColumn();
                 if ($newParentId <= 0) {
                     throw new RuntimeException('返信コメントが見つかりません。');
@@ -307,7 +308,7 @@ try {
                             resolved_at = ?,
                             sheet_status = ?,
                             desired_due_at = ?
-                      WHERE id = ? AND project_id = ? AND file_path = ? AND client_share_id IS NULL'
+                      WHERE id = ? AND project_id = ? AND client_share_id = ? AND file_path = ?'
                 );
                 $stmt->execute([
                     $comment['selector'],
@@ -317,29 +318,30 @@ try {
                     $comment['desired_due_at'],
                     $newParentId,
                     (int) $project['id'],
+                    $clientShareId,
                     $file,
                 ]);
 
                 $stmt = $pdo->prepare(
                     'UPDATE ' . table_name('comments') . '
                         SET parent_id = ?
-                      WHERE parent_id = ? AND id <> ? AND project_id = ? AND file_path = ? AND client_share_id IS NULL'
+                      WHERE parent_id = ? AND id <> ? AND project_id = ? AND client_share_id = ? AND file_path = ?'
                 );
-                $stmt->execute([$newParentId, $commentId, $newParentId, (int) $project['id'], $file]);
+                $stmt->execute([$newParentId, $commentId, $newParentId, (int) $project['id'], $clientShareId, $file]);
 
-                $stmt = $pdo->prepare('DELETE FROM ' . table_name('comments') . ' WHERE id = ? AND project_id = ? AND file_path = ? AND client_share_id IS NULL');
-                $stmt->execute([$commentId, (int) $project['id'], $file]);
+                $stmt = $pdo->prepare('DELETE FROM ' . table_name('comments') . ' WHERE id = ? AND project_id = ? AND client_share_id = ? AND file_path = ?');
+                $stmt->execute([$commentId, (int) $project['id'], $clientShareId, $file]);
                 $pdo->commit();
             } catch (Throwable $e) {
                 $pdo->rollBack();
                 throw $e;
             }
         } else {
-            $stmt = db()->prepare('DELETE FROM ' . table_name('comments') . ' WHERE id = ? AND project_id = ? AND file_path = ? AND client_share_id IS NULL');
-            $stmt->execute([$commentId, (int) $project['id'], $file]);
+            $stmt = db()->prepare('DELETE FROM ' . table_name('comments') . ' WHERE id = ? AND project_id = ? AND client_share_id = ? AND file_path = ?');
+            $stmt->execute([$commentId, (int) $project['id'], $clientShareId, $file]);
         }
 
-        public_comments_response(['ok' => true, 'focus_id' => $focusId, 'threads' => public_comments_payload((int) $project['id'], $file, $guestKey)]);
+        public_comments_response(['ok' => true, 'focus_id' => $focusId, 'threads' => public_comments_payload((int) $project['id'], $clientShareId, $file, $guestKey)]);
     }
 
     if ($action === 'update') {
@@ -351,10 +353,10 @@ try {
         $stmt = db()->prepare(
             'SELECT id, guest_key, parent_id
                FROM ' . table_name('comments') . '
-              WHERE id = ? AND project_id = ? AND file_path = ? AND client_share_id IS NULL
+              WHERE id = ? AND project_id = ? AND client_share_id = ? AND file_path = ?
               LIMIT 1'
         );
-        $stmt->execute([$commentId, (int) $project['id'], $file]);
+        $stmt->execute([$commentId, (int) $project['id'], $clientShareId, $file]);
         $comment = $stmt->fetch();
         if (!$comment) {
             throw new RuntimeException('編集するコメントが見つかりません。');
@@ -363,8 +365,8 @@ try {
             throw new RuntimeException('このコメントは編集できません。');
         }
 
-        $stmt = db()->prepare('UPDATE ' . table_name('comments') . ' SET body = ?, guest_name = ? WHERE id = ? AND project_id = ? AND file_path = ? AND client_share_id IS NULL');
-        $stmt->execute([$body, $guestName, $commentId, (int) $project['id'], $file]);
+        $stmt = db()->prepare('UPDATE ' . table_name('comments') . ' SET body = ?, guest_name = ? WHERE id = ? AND project_id = ? AND client_share_id = ? AND file_path = ?');
+        $stmt->execute([$body, $guestName, $commentId, (int) $project['id'], $clientShareId, $file]);
         reset_comment_ai_check_for_comment((int) $project['id'], $commentId);
         public_save_comment_images((int) $project['id'], $commentId);
 
@@ -372,7 +374,7 @@ try {
             'ok' => true,
             'updated_id' => $commentId,
             'focus_id' => $comment['parent_id'] === null ? $commentId : (int) $comment['parent_id'],
-            'threads' => public_comments_payload((int) $project['id'], $file, $guestKey),
+            'threads' => public_comments_payload((int) $project['id'], $clientShareId, $file, $guestKey),
         ]);
     }
 
@@ -385,30 +387,30 @@ try {
         $stmt = db()->prepare(
             'SELECT id, resolved_at
                FROM ' . table_name('comments') . '
-              WHERE id = ? AND project_id = ? AND file_path = ? AND parent_id IS NULL AND client_share_id IS NULL
+              WHERE id = ? AND project_id = ? AND client_share_id = ? AND file_path = ? AND parent_id IS NULL
               LIMIT 1'
         );
-        $stmt->execute([$commentId, (int) $project['id'], $file]);
+        $stmt->execute([$commentId, (int) $project['id'], $clientShareId, $file]);
         $comment = $stmt->fetch();
         if (!$comment) {
             throw new RuntimeException('対象コメントが見つかりません。');
         }
 
         $resolved = $comment['resolved_at'] === null;
-        $stmt = db()->prepare('UPDATE ' . table_name('comments') . ' SET resolved_at = ?, sheet_status = ? WHERE id = ? AND project_id = ? AND file_path = ? AND parent_id IS NULL AND client_share_id IS NULL');
-        $stmt->execute([$resolved ? date('Y-m-d H:i:s') : null, $resolved ? 'done' : 'todo', $commentId, (int) $project['id'], $file]);
+        $stmt = db()->prepare('UPDATE ' . table_name('comments') . ' SET resolved_at = ?, sheet_status = ? WHERE id = ? AND project_id = ? AND client_share_id = ? AND file_path = ? AND parent_id IS NULL');
+        $stmt->execute([$resolved ? date('Y-m-d H:i:s') : null, $resolved ? 'done' : 'todo', $commentId, (int) $project['id'], $clientShareId, $file]);
 
-        public_comments_response(['ok' => true, 'resolved' => $resolved, 'threads' => public_comments_payload((int) $project['id'], $file, $guestKey)]);
+        public_comments_response(['ok' => true, 'resolved' => $resolved, 'threads' => public_comments_payload((int) $project['id'], $clientShareId, $file, $guestKey)]);
     }
 
     if ($parentId > 0) {
-        $stmt = db()->prepare('SELECT id FROM ' . table_name('comments') . ' WHERE id = ? AND project_id = ? AND file_path = ? AND parent_id IS NULL AND client_share_id IS NULL');
-        $stmt->execute([$parentId, (int) $project['id'], $file]);
+        $stmt = db()->prepare('SELECT id FROM ' . table_name('comments') . ' WHERE id = ? AND project_id = ? AND client_share_id = ? AND file_path = ? AND parent_id IS NULL');
+        $stmt->execute([$parentId, (int) $project['id'], $clientShareId, $file]);
         if (!$stmt->fetch()) {
             throw new RuntimeException('返信先のコメントが見つかりません。');
         }
-        $stmt = db()->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?, ?)');
-        $stmt->execute([(int) $project['id'], $file, $guestName, $guestKey, $parentId, $body]);
+        $stmt = db()->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, client_share_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)');
+        $stmt->execute([(int) $project['id'], $clientShareId, $file, $guestName, $guestKey, $parentId, $body]);
         $createdId = $parentId;
         reset_comment_ai_checks((int) $project['id'], null, $parentId);
         public_save_comment_images((int) $project['id'], (int) db()->lastInsertId());
@@ -417,13 +419,13 @@ try {
             throw new RuntimeException('コメント対象を選択してください。');
         }
         $file = resolve_comment_file_for_selector($project, $file, $selector);
-        $stmt = db()->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, ?)');
-        $stmt->execute([(int) $project['id'], $file, $selector, $viewportMode !== '' ? $viewportMode : null, $guestName, $guestKey, $body]);
+        $stmt = db()->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, client_share_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?)');
+        $stmt->execute([(int) $project['id'], $clientShareId, $file, $selector, $viewportMode !== '' ? $viewportMode : null, $guestName, $guestKey, $body]);
         $createdId = (int) db()->lastInsertId();
         public_save_comment_images((int) $project['id'], $createdId);
     }
 
-    public_comments_response(['ok' => true, 'created_id' => $createdId, 'threads' => public_comments_payload((int) $project['id'], $file, $guestKey)]);
+    public_comments_response(['ok' => true, 'created_id' => $createdId, 'threads' => public_comments_payload((int) $project['id'], $clientShareId, $file, $guestKey)]);
 } catch (Throwable $e) {
     public_comments_response(['ok' => false, 'message' => $e->getMessage()], 400);
 }
