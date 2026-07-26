@@ -8,6 +8,7 @@ const WEBPATCH_SESSION_SECONDS = 259200;
 const WEBPATCH_MAX_USERS = 5;
 const WEBPATCH_MAX_URL_IMPORTS = 50;
 const WEBPATCH_MAX_URL_HTML_BYTES = 10485760;
+const WEBPATCH_MAX_URL_ASSET_BYTES = 52428800;
 const WEBPATCH_URL_FETCH_TIMEOUT = 10;
 const WEBPATCH_MAX_NOTE_BYTES = 2097152;
 const WEBPATCH_MAX_COMMENT_IMAGES = 8;
@@ -2620,6 +2621,9 @@ function should_skip_url_source_rewrite(string $target): bool
 
 function route_for_embedded_file(int|string $projectId, string $file, bool $isLink): string
 {
+    if (preg_match('/^https?:\/\//i', $file)) {
+        return base_url('asset.php?id=' . rawurlencode((string) $projectId) . '&source_url=' . rawurlencode($file));
+    }
     $path = is_html_file($file) && $isLink ? 'preview.php' : 'asset.php';
     return base_url($path . '?id=' . rawurlencode((string) $projectId) . '&file=' . rawurlencode($file));
 }
@@ -2775,7 +2779,148 @@ function url_project_preview_target(array $project, array $map, string $currentF
         return $route . $fragment;
     }
 
+    if (!$isLink && url_matches_project_host($normalized, $map)) {
+        $route = $routeBuilder
+            ? $routeBuilder(project_public_ref($project), $normalized, false)
+            : route_for_embedded_file(project_public_ref($project), $normalized, false);
+        return $route . $fragment;
+    }
+
     return $normalized . $fragment;
+}
+
+function url_matches_project_host(string $url, array $map): bool
+{
+    $normalized = normalize_import_url($url);
+    if ($normalized === null) {
+        return false;
+    }
+    $host = strtolower((string) (parse_url($normalized, PHP_URL_HOST) ?? ''));
+    $projectHost = strtolower((string) ($map['host'] ?? ''));
+    return $host !== '' && $projectHost !== '' && $host === $projectHost;
+}
+
+function url_project_asset_source(array $project, string $sourceUrl): string
+{
+    if (!project_is_url_source($project)) {
+        throw new RuntimeException('URL登録プロジェクトではありません。');
+    }
+
+    $map = url_project_map($project);
+    $normalized = normalize_import_url($sourceUrl);
+    if ($normalized === null || !url_matches_project_host($normalized, $map)) {
+        throw new RuntimeException('アセットURLが許可されていません。');
+    }
+
+    return $normalized;
+}
+
+function asset_mime_for_extension(string $extension, ?string $fallback = null): string
+{
+    $mimeMap = [
+        'css' => 'text/css; charset=UTF-8',
+        'js' => 'application/javascript; charset=UTF-8',
+        'mjs' => 'application/javascript; charset=UTF-8',
+        'svg' => 'image/svg+xml',
+        'png' => 'image/png',
+        'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'gif' => 'image/gif',
+        'webp' => 'image/webp',
+        'avif' => 'image/avif',
+        'ico' => 'image/x-icon',
+        'woff' => 'font/woff',
+        'woff2' => 'font/woff2',
+        'ttf' => 'font/ttf',
+        'otf' => 'font/otf',
+        'mp4' => 'video/mp4',
+        'webm' => 'video/webm',
+        'mov' => 'video/quicktime',
+        'mp3' => 'audio/mpeg',
+        'wav' => 'audio/wav',
+    ];
+    return $mimeMap[strtolower($extension)] ?? ($fallback ?: 'application/octet-stream');
+}
+
+function fetch_url_project_asset(array $project, string $sourceUrl): array
+{
+    $sourceUrl = url_project_asset_source($project, $sourceUrl);
+    $map = url_project_map($project);
+    $basicAuth = url_project_saved_basic_auth($map);
+    $buffer = '';
+    $ch = curl_init($sourceUrl);
+    if ($ch === false) {
+        throw new RuntimeException('アセット取得を開始できませんでした。');
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS => 5,
+        CURLOPT_RETURNTRANSFER => false,
+        CURLOPT_TIMEOUT => WEBPATCH_URL_FETCH_TIMEOUT,
+        CURLOPT_CONNECTTIMEOUT => WEBPATCH_URL_FETCH_TIMEOUT,
+        CURLOPT_USERAGENT => 'WebPatch Asset Proxy/1.0',
+        CURLOPT_SSL_VERIFYPEER => true,
+        CURLOPT_WRITEFUNCTION => static function ($ch, string $chunk) use (&$buffer): int {
+            $buffer .= $chunk;
+            if (strlen($buffer) > WEBPATCH_MAX_URL_ASSET_BYTES) {
+                return 0;
+            }
+            return strlen($chunk);
+        },
+    ]);
+    if ($basicAuth !== null) {
+        curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        curl_setopt($ch, CURLOPT_USERPWD, (string) $basicAuth['username'] . ':' . (string) $basicAuth['password']);
+    }
+    curl_exec($ch);
+    $error = curl_error($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $contentType = (string) curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+    $effectiveUrl = normalize_import_url((string) curl_getinfo($ch, CURLINFO_EFFECTIVE_URL)) ?? $sourceUrl;
+    curl_close($ch);
+
+    if ($error !== '') {
+        throw new RuntimeException('アセット取得失敗');
+    }
+    if ($status !== 200) {
+        throw new RuntimeException('HTTP ' . $status);
+    }
+    if (!url_matches_project_host($effectiveUrl, $map)) {
+        throw new RuntimeException('別ドメインへリダイレクト');
+    }
+    if (strlen($buffer) > WEBPATCH_MAX_URL_ASSET_BYTES) {
+        throw new RuntimeException('アセットサイズが大きすぎます。');
+    }
+
+    $extension = strtolower(pathinfo((string) (parse_url($effectiveUrl, PHP_URL_PATH) ?? ''), PATHINFO_EXTENSION));
+    return [
+        'body' => $buffer,
+        'content_type' => asset_mime_for_extension($extension, $contentType ?: null),
+        'effective_url' => $effectiveUrl,
+        'extension' => $extension,
+    ];
+}
+
+function rewrite_url_project_css_asset_references(string $css, array $project, string $sourceUrl, string $assetRoutePath, string $tokenKey, string $tokenValue): string
+{
+    return preg_replace_callback('/url\\(([^)]+)\\)/i', static function (array $matches) use ($project, $sourceUrl, $assetRoutePath, $tokenKey, $tokenValue): string {
+        $raw = trim($matches[1], " \t\n\r\0\x0B'\"");
+        if ($raw === '' || preg_match('/^(?:data:|blob:|#)/i', $raw)) {
+            return $matches[0];
+        }
+        $resolved = resolve_url_reference($sourceUrl, $raw);
+        try {
+            url_project_asset_source($project, $resolved);
+        } catch (Throwable $e) {
+            return $matches[0];
+        }
+        return 'url("' . base_url($assetRoutePath . '?' . $tokenKey . '=' . rawurlencode($tokenValue) . '&source_url=' . rawurlencode($resolved)) . '")';
+    }, $css) ?? $css;
+}
+
+function element_href_is_navigation_link(DOMElement $element): bool
+{
+    return in_array(strtolower($element->tagName), ['a', 'area'], true);
 }
 
 function rewrite_url_project_inline_asset_references(string $content, array $project, array $map, string $currentFile, ?callable $routeBuilder): string
@@ -2845,13 +2990,14 @@ function rewrite_html_for_preview(string $html, array $project, string $currentF
 
         if ($element->hasAttribute('href')) {
             $target = $element->getAttribute('href');
+            $isNavigationLink = element_href_is_navigation_link($element);
             if ($isUrlProject && !should_skip_url_source_rewrite($target)) {
                 $element->setAttribute('data-webpatch-original-href', $target);
-                $element->setAttribute('href', url_project_preview_target($project, $urlMap, $currentFile, $target, true, $routeBuilder));
+                $element->setAttribute('href', url_project_preview_target($project, $urlMap, $currentFile, $target, $isNavigationLink, $routeBuilder));
             } elseif (!$isUrlProject && should_rewrite_embedded_url($target)) {
                 $resolved = resolve_relative_file($currentFile, $target);
                 $element->setAttribute('data-webpatch-original-href', $target);
-                $element->setAttribute('href', $routeBuilder ? $routeBuilder($projectId, $resolved, true) : route_for_embedded_file($projectId, $resolved, true));
+                $element->setAttribute('href', $routeBuilder ? $routeBuilder($projectId, $resolved, $isNavigationLink) : route_for_embedded_file($projectId, $resolved, $isNavigationLink));
             }
         }
 

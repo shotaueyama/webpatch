@@ -16,6 +16,30 @@ if ($project === null) {
 }
 
 try {
+    $sourceUrl = trim((string) ($_GET['source_url'] ?? ''));
+    if ($sourceUrl !== '') {
+        $asset = fetch_url_project_asset($project, $sourceUrl);
+        header('Content-Type: ' . $asset['content_type']);
+        header('X-Content-Type-Options: nosniff');
+        header('Cache-Control: private, max-age=300');
+
+        if ($asset['extension'] === 'css' || str_contains(strtolower((string) $asset['content_type']), 'text/css')) {
+            $tokenKey = $isClientToken ? 'client_token' : 'token';
+            echo rewrite_url_project_css_asset_references(
+                (string) $asset['body'],
+                $project,
+                (string) $asset['effective_url'],
+                'public-asset',
+                $tokenKey,
+                $effectiveToken
+            );
+            exit;
+        }
+
+        echo $asset['body'];
+        exit;
+    }
+
     $file = normalize_zip_path((string) ($_GET['file'] ?? ''));
     if (is_html_file($file)) {
         $tokenKey = $isClientToken ? 'client_token' : 'token';
@@ -25,28 +49,8 @@ try {
 
     $path = safe_project_file($project, $file);
     $extension = strtolower(pathinfo($file, PATHINFO_EXTENSION));
-    $mimeMap = [
-        'css' => 'text/css; charset=UTF-8',
-        'js' => 'application/javascript; charset=UTF-8',
-        'mjs' => 'application/javascript; charset=UTF-8',
-        'svg' => 'image/svg+xml',
-        'png' => 'image/png',
-        'jpg' => 'image/jpeg',
-        'jpeg' => 'image/jpeg',
-        'gif' => 'image/gif',
-        'webp' => 'image/webp',
-        'ico' => 'image/x-icon',
-        'woff' => 'font/woff',
-        'woff2' => 'font/woff2',
-        'ttf' => 'font/ttf',
-        'otf' => 'font/otf',
-        'mp4' => 'video/mp4',
-        'webm' => 'video/webm',
-        'mp3' => 'audio/mpeg',
-        'wav' => 'audio/wav',
-    ];
     $finfo = new finfo(FILEINFO_MIME_TYPE);
-    $mime = $mimeMap[$extension] ?? ($finfo->file($path) ?: 'application/octet-stream');
+    $mime = asset_mime_for_extension($extension, $finfo->file($path) ?: null);
 
     header('Content-Type: ' . $mime);
     header('X-Content-Type-Options: nosniff');

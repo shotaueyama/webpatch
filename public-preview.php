@@ -23,8 +23,11 @@ try {
     }
 
     $route = static function (int|string $projectId, string $assetFile, bool $isLink) use ($effectiveToken, $isClientToken): string {
-        $path = is_html_file($assetFile) && $isLink ? 'public-preview' : 'public-asset';
         $tokenKey = $isClientToken ? 'client_token' : 'token';
+        if (preg_match('/^https?:\/\//i', $assetFile)) {
+            return base_url('public-asset?' . $tokenKey . '=' . rawurlencode($effectiveToken) . '&source_url=' . rawurlencode($assetFile));
+        }
+        $path = is_html_file($assetFile) && $isLink ? 'public-preview' : 'public-asset';
         return base_url($path . '?' . $tokenKey . '=' . rawurlencode($effectiveToken) . '&file=' . rawurlencode($assetFile));
     };
 
