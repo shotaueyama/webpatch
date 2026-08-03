@@ -75,8 +75,8 @@ function ai_test_connection(string $provider, string $model, string $apiKey): vo
 
     if ($provider === 'gemini') {
         ai_test_http_json(
-            'https://generativelanguage.googleapis.com/v1beta/models/' . rawurlencode($model) . ':generateContent?key=' . rawurlencode($apiKey),
-            [],
+            'https://generativelanguage.googleapis.com/v1beta/models/' . rawurlencode($model) . ':generateContent',
+            ['x-goog-api-key: ' . $apiKey],
             [
                 'contents' => [
                     [

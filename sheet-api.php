@@ -138,6 +138,30 @@ function sheet_api_comment_attachment_map(array $commentIds): array
     return $attachments;
 }
 
+function sheet_api_reply_text(array $replies): string
+{
+    $blocks = [];
+    foreach ($replies as $index => $reply) {
+        $meta = array_filter([
+            trim((string) ($reply['user_name'] ?? 'ゲスト')),
+            trim((string) ($reply['created_at'] ?? '')),
+        ]);
+        $lines = [
+            ((int) $index + 1) . '. ' . implode(' / ', $meta),
+            (string) ($reply['body'] ?? ''),
+        ];
+        foreach (($reply['attachment_paths'] ?? []) as $path) {
+            $path = trim((string) $path);
+            if ($path !== '') {
+                $lines[] = '#添付 ' . $path;
+            }
+        }
+        $blocks[] = implode("\n", array_filter($lines, static fn (string $line): bool => $line !== ''));
+    }
+
+    return implode("\n\n", $blocks);
+}
+
 function sheet_api_response_prompt(array $row, array $fileCopyTargets, string $copyPrompt): string
 {
     $file = (string) ($row['file_path'] ?? '');
@@ -193,7 +217,36 @@ function sheet_api_comment_rows(array $project, ?array $statusFilter = null, ?ar
     $comments = [];
     $stmt->execute([$projectId]);
     $rows = $stmt->fetchAll();
-    $attachmentsByComment = sheet_api_comment_attachment_map(array_column($rows, 'id'));
+    $parentCommentIds = array_map('intval', array_column($rows, 'id'));
+    $replyRows = [];
+    if ($parentCommentIds !== []) {
+        $placeholders = implode(',', array_fill(0, count($parentCommentIds), '?'));
+        $replyStmt = db()->prepare(
+            'SELECT c.id, c.parent_id, c.body, c.created_at, c.guest_name, u.name AS user_name
+               FROM ' . table_name('comments') . ' c
+               LEFT JOIN ' . table_name('users') . ' u ON u.id = c.user_id
+              WHERE c.project_id = ? AND c.parent_id IN (' . $placeholders . ')
+              ORDER BY c.created_at ASC, c.id ASC'
+        );
+        $replyStmt->execute(array_merge([$projectId], $parentCommentIds));
+        $replyRows = $replyStmt->fetchAll();
+    }
+
+    $replyCommentIds = array_map('intval', array_column($replyRows, 'id'));
+    $attachmentsByComment = sheet_api_comment_attachment_map(array_merge($parentCommentIds, $replyCommentIds));
+    $repliesByParent = [];
+    foreach ($replyRows as $replyRow) {
+        $replyAttachments = $attachmentsByComment[(int) $replyRow['id']] ?? [];
+        $repliesByParent[(int) $replyRow['parent_id']][] = [
+            'id' => (int) $replyRow['id'],
+            'body' => $replyRow['body'],
+            'created_at' => $replyRow['created_at'],
+            'user_name' => $replyRow['user_name'] ?: ($replyRow['guest_name'] ?: 'ゲスト'),
+            'attachments' => $replyAttachments,
+            'attachment_paths' => array_map(static fn (array $attachment): string => (string) $attachment['path'], $replyAttachments),
+        ];
+    }
+
     foreach ($rows as $row) {
         $status = $row['resolved_at'] !== null ? 'done' : ($row['confirmation_pending_at'] !== null ? 'pending' : sheet_api_status((string) ($row['sheet_status'] ?? 'todo')));
         if ($statusFilter !== null && !in_array($status, $statusFilter, true)) {
@@ -227,6 +280,10 @@ function sheet_api_comment_rows(array $project, ?array $statusFilter = null, ?ar
         $attachments = $attachmentsByComment[(int) $row['id']] ?? [];
         $comment['attachments'] = $attachments;
         $comment['attachment_paths'] = array_map(static fn (array $attachment): string => (string) $attachment['path'], $attachments);
+        $replies = $repliesByParent[(int) $row['id']] ?? [];
+        $comment['replies'] = $replies;
+        $comment['reply_count'] = count($replies);
+        $comment['reply_text'] = sheet_api_reply_text($replies);
         $comment['response_prompt'] = sheet_api_response_prompt($comment, $fileCopyTargets, $copyPrompt);
         $comments[] = sheet_api_apply_fields($comment, $fields);
     }

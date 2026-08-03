@@ -187,9 +187,43 @@ $stmt->execute([(int) $project['id']]);
 
 $comments = [];
 $commentRows = $stmt->fetchAll();
-$attachmentsByComment = sheet_comment_attachment_map(array_column($commentRows, 'id'), $publicToken);
+$parentCommentIds = array_map('intval', array_column($commentRows, 'id'));
+$replyRows = [];
+if ($parentCommentIds !== []) {
+    $placeholders = implode(',', array_fill(0, count($parentCommentIds), '?'));
+    $replyWhere = 'WHERE c.project_id = ? AND c.parent_id IN (' . $placeholders . ')';
+    if ($publicToken !== '') {
+        $replyWhere .= ' AND c.client_share_id IS NULL';
+    }
+    $replyStmt = db()->prepare(
+        'SELECT c.id, c.parent_id, c.body, c.created_at, c.guest_name, u.name AS user_name
+           FROM ' . table_name('comments') . ' c
+           LEFT JOIN ' . table_name('users') . ' u ON u.id = c.user_id
+          ' . $replyWhere . '
+          ORDER BY c.created_at ASC, c.id ASC'
+    );
+    $replyStmt->execute(array_merge([(int) $project['id']], $parentCommentIds));
+    $replyRows = $replyStmt->fetchAll();
+}
+
+$replyCommentIds = array_map('intval', array_column($replyRows, 'id'));
+$attachmentsByComment = sheet_comment_attachment_map(array_merge($parentCommentIds, $replyCommentIds), $publicToken);
+$repliesByParent = [];
+foreach ($replyRows as $replyRow) {
+    $replyAttachments = $attachmentsByComment[(int) $replyRow['id']] ?? [];
+    $repliesByParent[(int) $replyRow['parent_id']][] = [
+        'id' => (int) $replyRow['id'],
+        'body' => $replyRow['body'],
+        'created_at' => $replyRow['created_at'],
+        'user_name' => $replyRow['user_name'] ?: ($replyRow['guest_name'] ?: 'ゲスト'),
+        'attachments' => $replyAttachments,
+        'attachment_paths' => array_map(static fn (array $attachment): string => (string) $attachment['path'], $replyAttachments),
+    ];
+}
+
 foreach ($commentRows as $row) {
     $attachments = $attachmentsByComment[(int) $row['id']] ?? [];
+    $replies = $repliesByParent[(int) $row['id']] ?? [];
     $comments[] = [
         'id' => (int) $row['id'],
         'file_path' => $row['file_path'],
@@ -210,6 +244,8 @@ foreach ($commentRows as $row) {
         'user_name' => $row['user_name'] ?: 'ゲスト',
         'attachments' => $attachments,
         'attachment_paths' => array_map(static fn (array $attachment): string => (string) $attachment['path'], $attachments),
+        'replies' => $replies,
+        'reply_count' => count($replies),
     ];
 }
 
@@ -305,7 +341,7 @@ $sheetData = [
           <div class="sheet-help">ステータスはクリックで選択、希望完了日時はクリックで編集</div>
           <button class="sheet-download-button" id="csv-download-button" type="button">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4.5v9.2m0 0 3.55-3.55M12 13.7l-3.55-3.55M5.5 17.8v.7a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2v-.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <span>CSVダウンロード</span>
+            <span>CSVダウンロード（返信含む）</span>
           </button>
           <?php if ($canManageApi): ?>
           <button class="sheet-download-button" id="api-reference-download-button" type="button">
@@ -419,6 +455,7 @@ $sheetData = [
         const columns = [
           { key: 'selector', label: 'コメントの位置', width: 330 },
           { key: 'body', label: 'コメント内容', width: 520 },
+          { key: 'replies', label: '返信', width: 520 },
           { key: 'status', label: 'ステータス', width: 140 },
           { key: 'due', label: '希望完了日時', width: 190 },
           { key: 'ai_status', label: 'AI確認', width: 140 },
@@ -484,17 +521,29 @@ $sheetData = [
           const prompt = String(sheetData.copy_prompt || '').trim();
           return prompt ? `${baseText}\n\n${prompt}` : baseText;
         };
+        const replyTextValue = (comment) => {
+          const replies = Array.isArray(comment.replies) ? comment.replies : [];
+          return replies.map((reply, index) => {
+            const createdAt = reply.created_at ? String(reply.created_at).replace('T', ' ').slice(0, 16) : '';
+            const meta = [reply.user_name || 'ゲスト', createdAt].filter(Boolean).join(' / ');
+            const attachmentLines = Array.isArray(reply.attachment_paths)
+              ? reply.attachment_paths.map((path) => String(path || '').trim()).filter(Boolean).map((path) => `#添付 ${path}`)
+              : [];
+            return [`${index + 1}. ${meta}`, reply.body || '', ...attachmentLines].filter(Boolean).join('\n');
+          }).join('\n\n');
+        };
         const csvEscape = (value) => {
           const text = String(value ?? '');
           return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
         };
         const downloadCsv = async () => {
           await commitOpenEditors();
-          const header = ['ページ', 'コメントの位置', 'コメント内容', 'ステータス', '希望完了日時', 'AI確認', 'AI要約', 'AI確認日時', 'AIプロバイダ', 'AIモデル', '投稿者', '作成日時', '対応プロンプト'];
+          const header = ['ページ', 'コメントの位置', 'コメント内容', '返信コメント', 'ステータス', '希望完了日時', 'AI確認', 'AI要約', 'AI確認日時', 'AIプロバイダ', 'AIモデル', '投稿者', '作成日時', '対応プロンプト'];
           const rows = sheetData.comments.map((comment) => [
             comment.file_path || '',
             comment.selector || '',
             comment.body || '',
+            replyTextValue(comment),
             statusByKey(comment.sheet_status).label,
             formatDue(comment.desired_due_at),
             aiStatusByKey(comment.ai_check_status).label,
@@ -573,7 +622,7 @@ $sheetData = [
             '| パラメータ | 値 | 説明 |',
             '| --- | --- | --- |',
             '| `status` | `todo`, `doing`, `pending`, `done` | 指定したステータスだけ取得。カンマ区切りで複数指定可。 |',
-            '| `fields` | `id`, `file_path`, `selector`, `body`, `sheet_status`, `status_label`, `desired_due_at`, `attachments`, `attachment_paths`, `response_prompt` など | 返却フィールドを限定。カンマ区切りで複数指定可。 |',
+            '| `fields` | `id`, `file_path`, `selector`, `body`, `replies`, `reply_count`, `reply_text`, `sheet_status`, `status_label`, `desired_due_at`, `attachments`, `attachment_paths`, `response_prompt` など | 返却フィールドを限定。カンマ区切りで複数指定可。 |',
             '',
             '### 未着手の対応プロンプトだけ取得',
             '',
@@ -629,6 +678,9 @@ $sheetData = [
             '| `selector` | コメント対象DOMのselector |',
             '| `comment_position` | ページパスとselectorを結合した位置情報 |',
             '| `body` | コメント内容 |',
+            '| `replies` | 返信の配列。投稿者、日時、本文、添付情報を含みます。 |',
+            '| `reply_count` | 返信件数 |',
+            '| `reply_text` | 返信を投稿順に整形したテキスト |',
             '| `sheet_status` / `status` | ステータスAPI値 |',
             '| `status_label` | 日本語ステータス |',
             '| `desired_due_at` | 希望完了日時 |',
@@ -912,6 +964,7 @@ $sheetData = [
         const rowTextValue = (comment, key) => {
           if (key === 'selector') return comment.selector || '';
           if (key === 'body') return comment.body || '';
+          if (key === 'replies') return replyTextValue(comment);
           if (key === 'due') return formatDue(comment.desired_due_at);
           if (key === 'ai_summary') return comment.ai_check_summary || '';
           if (key === 'ai_checked_at') return formatDue(comment.ai_checked_at);

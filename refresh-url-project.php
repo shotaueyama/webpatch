@@ -24,14 +24,26 @@ try {
         throw new RuntimeException('編集権限のあるメンバーのみURL再取得できます。');
     }
 
-    $result = refresh_url_project($project, [
+    $basicAuth = [
         'username' => (string) ($_POST['basic_auth_username'] ?? ''),
         'password' => (string) ($_POST['basic_auth_password'] ?? ''),
-    ]);
+    ];
+    $action = (string) ($_POST['refresh_action'] ?? 'refresh');
+
+    if ($action === 'add_url') {
+        $result = add_url_project_page($project, (string) ($_POST['additional_url'] ?? ''), $basicAuth);
+        set_flash('success', 'URLから1ページ追加しました。');
+        redirect_to(project_path($project, (string) $result['file']));
+    }
+
+    $result = refresh_url_project($project, $basicAuth, $_FILES['url_csv'] ?? null);
     reset_comment_ai_checks((int) $project['id']);
 
     $skipped = is_array($result['skipped'] ?? null) ? $result['skipped'] : [];
     $message = 'URLから' . (int) ($result['updated'] ?? 0) . 'ページを再取得しました。';
+    if ((int) ($result['added'] ?? 0) > 0) {
+        $message .= ' 新規ページを' . (int) $result['added'] . '件追加しました。';
+    }
     if ((int) ($result['removed'] ?? 0) > 0) {
         $message .= ' 存在しないページを' . (int) $result['removed'] . '件除外しました。';
     }

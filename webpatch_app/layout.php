@@ -20,7 +20,7 @@ function render_auth_page(string $title, string $eyebrow, string $heading, strin
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-    <link rel="stylesheet" href="<?= h(base_url('styles.css')) ?>">
+    <link rel="stylesheet" href="<?= h(base_url('styles.css?v=20260803-single-url-add')) ?>">
   </head>
   <body>
     <main class="auth-shell">
@@ -78,7 +78,7 @@ function render_app_page(string $title, string $content, string $mainClass = '',
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
-    <link rel="stylesheet" href="<?= h(base_url('styles.css')) ?>">
+    <link rel="stylesheet" href="<?= h(base_url('styles.css?v=20260803-single-url-add')) ?>">
   </head>
   <body>
     <div class="app-shell">

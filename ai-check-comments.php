@@ -103,8 +103,8 @@ function ai_check_call(array $setting, string $prompt): array
         );
     } elseif ($provider === 'gemini') {
         $response = ai_check_http_json(
-            'https://generativelanguage.googleapis.com/v1beta/models/' . rawurlencode($model) . ':generateContent?key=' . rawurlencode($apiKey),
-            [],
+            'https://generativelanguage.googleapis.com/v1beta/models/' . rawurlencode($model) . ':generateContent',
+            ['x-goog-api-key: ' . $apiKey],
             [
                 'contents' => [
                     [
@@ -231,7 +231,7 @@ function ai_check_count_targets(int $projectId): int
     return (int) $stmt->fetchColumn();
 }
 
-function ai_check_create_job(array $project, int $userId): array
+function ai_check_create_job(array $project, int $userId, array $setting): array
 {
     ensure_ai_check_jobs_table();
     $total = ai_check_count_targets((int) $project['id']);
@@ -239,13 +239,15 @@ function ai_check_create_job(array $project, int $userId): array
     $jobId = random_alnum_id(16);
     $status = $total > 0 ? 'queued' : 'done';
     $stmt = db()->prepare(
-        'INSERT INTO ' . table_name('ai_check_jobs') . ' (public_id, project_id, user_id, status, total_count, counts_json, finished_at)
-         VALUES (?, ?, ?, ?, ?, ?, ' . ($status === 'done' ? 'NOW()' : 'NULL') . ')'
+        'INSERT INTO ' . table_name('ai_check_jobs') . ' (public_id, project_id, user_id, ai_provider, ai_model, status, total_count, counts_json, finished_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ' . ($status === 'done' ? 'NOW()' : 'NULL') . ')'
     );
     $stmt->execute([
         $jobId,
         (int) $project['id'],
         $userId,
+        (string) $setting['provider'],
+        (string) $setting['model'],
         $status,
         $total,
         json_encode($counts, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
@@ -288,6 +290,8 @@ function ai_check_job_payload(array $job, string $message = ''): array
         'failed' => (int) $job['failed_count'],
         'remaining' => max(0, $total - $processed),
         'counts' => $counts,
+        'provider' => (string) ($job['ai_provider'] ?? ''),
+        'model' => (string) ($job['ai_model'] ?? ''),
         'message' => $message !== '' ? $message : (($status === 'done') ? 'AI確認を完了しました。' : (($status === 'error') ? ((string) ($job['error_message'] ?? 'AI確認に失敗しました。')) : 'AI確認を処理中です。')),
         'error_message' => (string) ($job['error_message'] ?? ''),
     ];
@@ -329,10 +333,19 @@ function ai_check_process_job(array $job, array $project, int $userId, int $batc
         @set_time_limit(75);
     }
 
-    $settings = ai_check_execution_settings_for_user($userId);
+    $jobProvider = normalize_ai_provider((string) ($job['ai_provider'] ?? ''));
+    $jobModel = (string) ($job['ai_model'] ?? '');
+    if ($jobProvider !== '' && $jobModel !== '') {
+        $setting = ai_execution_setting_for_user_provider($userId, $jobProvider, $jobModel);
+        $settings = $setting === [] ? [] : [$setting];
+    } else {
+        // Existing jobs created before provider/model snapshots were introduced.
+        $settings = ai_check_execution_settings_for_user($userId);
+        $jobProvider = (string) ($settings[0]['provider'] ?? '');
+    }
     if ($settings === []) {
-        $selectedProvider = ai_provider_definitions()[ai_check_provider_for_user($userId)]['label'] ?? '選択中のLLM';
-        return ai_check_save_job_progress($job, ai_check_decode_counts($job['counts_json'] ?? null), 0, 0, 'error', $selectedProvider . ' のAPIキーが未設定です。アカウント設定でAI確認に使うLLMとAPIキーを確認してください。');
+        $selectedProvider = ai_provider_definitions()[$jobProvider]['label'] ?? '選択中のプロバイダ';
+        return ai_check_save_job_progress($job, ai_check_decode_counts($job['counts_json'] ?? null), 0, 0, 'error', $selectedProvider . ' のAPIキーが未設定です。アカウント設定でAI確認に使うプロバイダとAPIキーを確認してください。');
     }
 
     if ((string) $job['status'] === 'queued') {
@@ -453,11 +466,12 @@ try {
         if ($project === null) {
             throw new RuntimeException('プロジェクトが見つかりません。');
         }
-        if (ai_check_execution_settings_for_user((int) $user['id']) === []) {
-            $selectedProvider = ai_provider_definitions()[ai_check_provider_for_user((int) $user['id'])]['label'] ?? '選択中のLLM';
-            throw new RuntimeException($selectedProvider . ' のAPIキーが未設定です。アカウント設定でAI確認に使うLLMとAPIキーを確認してください。');
+        $settings = ai_check_execution_settings_for_user((int) $user['id']);
+        if ($settings === []) {
+            $selectedProvider = ai_provider_definitions()[ai_check_provider_for_user((int) $user['id'])]['label'] ?? '選択中のプロバイダ';
+            throw new RuntimeException($selectedProvider . ' のAPIキーが未設定です。アカウント設定でAI確認に使うプロバイダとAPIキーを確認してください。');
         }
-        $job = ai_check_create_job($project, (int) $user['id']);
+        $job = ai_check_create_job($project, (int) $user['id'], $settings[0]);
         ai_check_response(ai_check_job_payload($job, ((int) $job['total_count'] > 0) ? 'AI確認を開始しました。' : 'AI確認が必要なコメントはありません。'));
     }
 

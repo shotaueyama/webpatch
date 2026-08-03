@@ -16,7 +16,7 @@ if ($project === null) {
 $files = project_sidebar_html_files($project);
 $fileTitles = project_file_display_titles($project, $files);
 $fileCopyTargets = project_file_copy_targets($project, $files);
-$pageCommentMarkerStates = page_comment_marker_states_for_project((int) $project['id'], null, true);
+$pageCommentMarkerStates = page_comment_marker_states_for_project((int) $project['id'], null, true, null, true);
 
 $activeFile = (string) ($_GET['file'] ?? $project['entry_file']);
 if (!in_array($activeFile, $files, true)) {
@@ -32,7 +32,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
     <meta name="robots" content="noindex,nofollow,noarchive">
     <title><?= h($project['title']) ?> | WebPatch 公開コメント</title>
     <link rel="icon" type="image/svg+xml" href="<?= h(base_url('favicon.svg')) ?>">
-    <link rel="stylesheet" href="<?= h(base_url('styles.css')) ?>">
+    <link rel="stylesheet" href="<?= h(base_url('styles.css?v=20260730-public-page-comment-stats')) ?>">
   </head>
   <body>
     <div class="app-shell public-share-shell">
@@ -71,7 +71,15 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
             </div>
             <section class="sidebar-tab-panel active" id="pages-tab" role="tabpanel" aria-labelledby="pages-tab-button" data-sidebar-panel="pages">
               <div class="project-summary">
-                <p class="eyebrow">Public Comment</p>
+                <div class="page-list-heading">
+                  <p class="eyebrow">Public Comment</p>
+                  <div class="page-search" data-page-search>
+                    <input class="page-search-input" type="search" data-page-search-input placeholder="ページを検索" aria-label="ページを検索" autocomplete="off">
+                    <button class="page-search-toggle" type="button" data-page-search-toggle aria-label="ページ検索を開く" aria-expanded="false" title="ページを検索">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="5.8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.2 15.2 4.1 4.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                    </button>
+                  </div>
+                </div>
                 <h1><?= h($project['title']) ?></h1>
                 <div class="active-page-meta">
                   <strong><?= h($activeFileTitle) ?></strong>
@@ -81,21 +89,32 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
               <div class="file-list">
                 <?php foreach ($files as $file): ?>
                   <?php $pageMarker = $pageCommentMarkerStates[$file] ?? null; ?>
-                  <a class="<?= $file === $activeFile ? 'active' : '' ?>" href="<?= h(base_url('public-project.php?token=' . rawurlencode($token) . '&file=' . rawurlencode($file))) ?>">
+                  <a class="<?= $file === $activeFile ? 'active' : '' ?>" href="<?= h(base_url('public-project.php?token=' . rawurlencode($token) . '&file=' . rawurlencode($file))) ?>" data-page-file="<?= h($file) ?>">
                     <span class="file-list-title">
                       <span><?= h($fileTitles[$file] ?? $file) ?></span>
-                      <?php if ($pageMarker !== null): ?>
-                        <?php
-                          $markerState = (string) ($pageMarker['state'] ?? 'attention');
-                          $markerCount = (int) ($pageMarker['count'] ?? 0);
-                          $markerLabel = $markerState === 'pending' ? '確認待ちコメント' : '未対応コメント';
-                        ?>
-                        <span class="page-comment-dot <?= $markerState === 'pending' ? 'pending' : 'attention' ?>" title="<?= h($markerLabel . ' ' . $markerCount . '件') ?>" aria-label="<?= h($markerLabel . ' ' . $markerCount . '件') ?>"></span>
-                      <?php endif; ?>
+                      <?php
+                        $markerState = (string) ($pageMarker['state'] ?? 'attention');
+                        $markerCount = (int) ($pageMarker['count'] ?? 0);
+                        $markerUnreadCount = (int) ($pageMarker['unread_count'] ?? 0);
+                        $markerConfirmationCount = (int) ($pageMarker['confirmation_count'] ?? 0);
+                        $markerResolvedCount = (int) ($pageMarker['resolved_count'] ?? 0);
+                        $markerReplyCount = (int) ($pageMarker['reply_count'] ?? 0);
+                      ?>
+                      <span class="page-comment-dot <?= $markerState === 'pending' ? 'pending' : ($markerState === 'completed' ? 'completed' : 'attention') ?>" data-page-comment-marker title="<?= h('コメント ' . $markerCount . '件（返信を含む）') ?>" aria-label="<?= h('コメント ' . $markerCount . '件（返信を含む）') ?>" <?= $pageMarker === null ? 'hidden' : '' ?>>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.75 5.5h10.5A3.25 3.25 0 0 1 20.5 8.75v5.5a3.25 3.25 0 0 1-3.25 3.25h-3.9l-3.82 2.86a.72.72 0 0 1-1.15-.58V17.5H6.75A3.25 3.25 0 0 1 3.5 14.25v-5.5A3.25 3.25 0 0 1 6.75 5.5Z" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linejoin="round"/></svg>
+                        <span data-page-comment-count aria-hidden="true"><?= $markerCount > 99 ? '99+' : $markerCount ?></span>
+                      </span>
+                    </span>
+                    <span class="page-comment-stats" data-page-comment-stats aria-label="<?= h('未読 ' . $markerUnreadCount . '件、確認 ' . $markerConfirmationCount . '件、完了 ' . $markerResolvedCount . '件、返信 ' . $markerReplyCount . '件') ?>" <?= $pageMarker === null ? 'hidden' : '' ?>>
+                      <span class="page-comment-stat"><span>未読</span><strong class="page-unread-count<?= $markerUnreadCount > 0 ? ' has-value' : '' ?>" data-page-unread-count><?= $markerUnreadCount ?></strong></span>
+                      <span class="page-comment-stat"><span>確認</span><strong data-page-confirmation-count><?= $markerConfirmationCount ?></strong></span>
+                      <span class="page-comment-stat"><span>完了</span><strong data-page-resolved-count><?= $markerResolvedCount ?></strong></span>
+                      <span class="page-comment-stat"><span>返信</span><strong data-page-reply-count><?= $markerReplyCount ?></strong></span>
                     </span>
                     <span class="file-list-path"><?= h($file) ?></span>
                   </a>
                 <?php endforeach; ?>
+                <p class="page-search-empty" data-page-search-empty hidden>一致するページがありません。</p>
               </div>
             </section>
             <section class="sidebar-tab-panel" id="comments-tab" role="tabpanel" aria-labelledby="comments-tab-button" data-sidebar-panel="comments" hidden>
@@ -191,6 +210,66 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
 
         scheduleActivePageScroll();
         window.addEventListener('webpatch:pages-tab-active', scheduleActivePageScroll);
+      })();
+
+      (() => {
+        const search = document.querySelector('[data-page-search]');
+        const list = document.querySelector('.file-list');
+        if (!search || !list) {
+          return;
+        }
+
+        const toggle = search.querySelector('[data-page-search-toggle]');
+        const input = search.querySelector('[data-page-search-input]');
+        const empty = list.querySelector('[data-page-search-empty]');
+        const pages = Array.from(list.querySelectorAll('a'));
+
+        const normalize = (value) => value.toLocaleLowerCase('ja').normalize('NFKC');
+        const filterPages = () => {
+          const query = normalize(input.value.trim());
+          let visibleCount = 0;
+          pages.forEach((page) => {
+            const matches = query === '' || normalize(page.textContent || '').includes(query);
+            page.classList.toggle('page-search-hidden', !matches);
+            if (matches) {
+              visibleCount += 1;
+            }
+          });
+          if (empty) {
+            empty.hidden = visibleCount !== 0;
+          }
+        };
+
+        const openSearch = () => {
+          search.classList.add('open');
+          toggle.setAttribute('aria-expanded', 'true');
+          toggle.setAttribute('aria-label', 'ページ検索を閉じる');
+          window.requestAnimationFrame(() => input.focus());
+        };
+
+        const closeSearch = () => {
+          search.classList.remove('open');
+          toggle.setAttribute('aria-expanded', 'false');
+          toggle.setAttribute('aria-label', 'ページ検索を開く');
+          input.value = '';
+          filterPages();
+          toggle.focus();
+        };
+
+        toggle.addEventListener('click', () => {
+          if (search.classList.contains('open')) {
+            closeSearch();
+          } else {
+            openSearch();
+          }
+        });
+        input.addEventListener('input', filterPages);
+        input.addEventListener('keydown', (event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            closeSearch();
+          }
+        });
       })();
 
       (() => {
@@ -330,6 +409,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
         let pendingDeleteComment = null;
         let commentMode = true;
         let hoverTarget = null;
+        const hoverGuardDocuments = new WeakSet();
         const showToast = (message, type = 'success') => window.webpatchShowToast && window.webpatchShowToast(message, type);
         const guestKeyStorage = 'webpatch-public-guest-key';
         const randomGuestKey = () => {
@@ -457,6 +537,68 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
         };
         const displayFileLabel = (file) => pathWithoutRoot(file) || baseName(file);
         const escapeCss = (value) => window.CSS && CSS.escape ? CSS.escape(value) : value.replace(/[^A-Za-z0-9_-]/g, '\\$&');
+        const updatePageCommentState = (file, state) => {
+          const pageLink = document.querySelector(`[data-page-file="${escapeCss(file)}"]`);
+          if (!pageLink) return;
+          const marker = pageLink.querySelector('[data-page-comment-marker]');
+          const stats = pageLink.querySelector('[data-page-comment-stats]');
+          const hasComments = Boolean(state) && Number(state.count || 0) > 0;
+          if (marker) marker.hidden = !hasComments;
+          if (stats) stats.hidden = !hasComments;
+          if (!hasComments) return;
+
+          const markerState = ['attention', 'pending', 'completed'].includes(state.state) ? state.state : 'attention';
+          const count = Number(state.count || 0);
+          const unreadCount = Number(state.unread_count || 0);
+          const confirmationCount = Number(state.confirmation_count || 0);
+          const resolvedCount = Number(state.resolved_count || 0);
+          const replyCount = Number(state.reply_count || 0);
+          if (marker) {
+            marker.classList.remove('attention', 'pending', 'completed');
+            marker.classList.add(markerState);
+            marker.title = `コメント ${count}件（返信を含む）`;
+            marker.setAttribute('aria-label', marker.title);
+            const countElement = marker.querySelector('[data-page-comment-count]');
+            if (countElement) countElement.textContent = count > 99 ? '99+' : String(count);
+          }
+          const unreadElement = stats?.querySelector('[data-page-unread-count]');
+          const confirmationElement = stats?.querySelector('[data-page-confirmation-count]');
+          const resolvedElement = stats?.querySelector('[data-page-resolved-count]');
+          const replyElement = stats?.querySelector('[data-page-reply-count]');
+          if (unreadElement) {
+            unreadElement.textContent = String(unreadCount);
+            unreadElement.classList.toggle('has-value', unreadCount > 0);
+          }
+          if (confirmationElement) confirmationElement.textContent = String(confirmationCount);
+          if (resolvedElement) resolvedElement.textContent = String(resolvedCount);
+          if (replyElement) replyElement.textContent = String(replyCount);
+          if (stats) stats.setAttribute('aria-label', `未読 ${unreadCount}件、確認 ${confirmationCount}件、完了 ${resolvedCount}件、返信 ${replyCount}件`);
+        };
+        const applyPageCommentStates = (states) => {
+          const values = states && typeof states === 'object' ? states : {};
+          document.querySelectorAll('.file-list a[data-page-file]').forEach((pageLink) => {
+            const file = pageLink.dataset.pageFile || '';
+            updatePageCommentState(file, values[file] || null);
+          });
+        };
+        const syncActivePageCommentStats = () => {
+          if (threads.length === 0) {
+            updatePageCommentState(activeFile, null);
+            return;
+          }
+          const attentionCount = threads.filter((thread) => !thread.is_resolved && !thread.is_confirmation_pending).length;
+          const confirmationCount = threads.filter((thread) => !thread.is_resolved && Boolean(thread.is_confirmation_pending)).length;
+          const resolvedCount = threads.filter((thread) => Boolean(thread.is_resolved)).length;
+          const replyCount = threads.reduce((total, thread) => total + (Array.isArray(thread.replies) ? thread.replies.length : 0), 0);
+          updatePageCommentState(activeFile, {
+            state: attentionCount > 0 ? 'attention' : (confirmationCount > 0 ? 'pending' : 'completed'),
+            count: threads.length + replyCount,
+            unread_count: threads.filter((thread) => Boolean(thread.has_unread_activity)).length,
+            confirmation_count: confirmationCount,
+            resolved_count: resolvedCount,
+            reply_count: replyCount
+          });
+        };
         const commentTargetElement = (element) => {
           if (!element || element.nodeType !== 1) {
             return element;
@@ -482,7 +624,12 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
             const siblings = Array.from(node.parentElement ? node.parentElement.children : []);
             const sameTag = siblings.filter((sibling) => sibling.tagName.toLowerCase() === tag);
             let part = tag;
-            const classes = Array.from(node.classList).filter((name) => !name.startsWith('webpatch-'));
+            const classes = Array.from(node.classList).filter((name) => {
+              if (name.startsWith('webpatch-')) return false;
+              return !/(^|[-_])(hover|hovered|active|focus|focused|open|opened|show|shown|visible|selected|current|expanded)([-_]|$)/i.test(name)
+                && !/^(is|has)[-_](on|hover|active|focus|open|show|visible|selected|current|expanded)$/i.test(name)
+                && name.toLowerCase() !== 'on';
+            });
             if (classes[0]) part += `.${escapeCss(classes[0])}`;
             if (sameTag.length > 1) part += `:nth-of-type(${sameTag.indexOf(node) + 1})`;
             parts.unshift(part);
@@ -490,6 +637,19 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
             node = node.parentElement;
           }
           return parts.join(' > ') || 'body';
+        };
+        const installCommentHoverGuard = (doc) => {
+          if (!doc || hoverGuardDocuments.has(doc)) return;
+          hoverGuardDocuments.add(doc);
+          const stopSiteHover = (event) => {
+            if (!commentMode) return;
+            const target = event.target;
+            if (target && target.nodeType === 1 && target.closest('[data-webpatch-comment-marker], #webpatch-comment-marker-layer')) return;
+            event.stopImmediatePropagation();
+          };
+          ['mouseover', 'mouseenter', 'pointerover', 'pointerenter', 'pointermove'].forEach((type) => {
+            doc.addEventListener(type, stopSiteHover, true);
+          });
         };
         const formatCommentTime = (value) => {
           const text = String(value || '').trim();
@@ -590,6 +750,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
           const pageScrollX = window.scrollX;
           const pageScrollY = window.scrollY;
           activeThreadId = thread.id;
+          markThreadRead(thread);
           draftSelector = null;
           editCommentId = null;
           editCommentFile = thread.file_path || activeFile;
@@ -913,6 +1074,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
         });
         const renderList = () => {
           list.replaceChildren();
+          syncActivePageCommentStats();
           if (threads.length === 0) {
             const empty = document.createElement('p');
             empty.className = 'share-empty';
@@ -951,16 +1113,23 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
             page.textContent = displayFileLabel(thread.file_path || activeFile);
             const body = document.createElement('small');
             body.textContent = thread.body;
-            const count = document.createElement('span');
-            count.textContent = `${thread.replies.length}件の返信`;
+            const replyCount = thread.replies.length;
             const actions = document.createElement('div');
             actions.className = 'comment-card-actions';
             const openButton = document.createElement('button');
             openButton.className = 'comment-card-action-button comment-open-button';
+            openButton.classList.toggle('has-replies', replyCount > 0);
             openButton.type = 'button';
-            openButton.setAttribute('aria-label', `コメント ${threadNumber(thread)} をポップアップで開く`);
+            openButton.setAttribute('aria-label', `コメント ${threadNumber(thread)} をポップアップで開く（返信${replyCount}件）`);
             openButton.title = 'ポップアップで開く';
             openButton.innerHTML = '<svg class="comment-card-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.75 5.5h10.5A3.25 3.25 0 0 1 20.5 8.75v5.5a3.25 3.25 0 0 1-3.25 3.25h-3.9l-3.82 2.86a.72.72 0 0 1-1.15-.58V17.5H6.75A3.25 3.25 0 0 1 3.5 14.25v-5.5A3.25 3.25 0 0 1 6.75 5.5Z" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linejoin="round"/><path d="M8.25 10h7.5M8.25 13h5.25" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round"/></svg>';
+            if (replyCount > 0) {
+              const replyBadge = document.createElement('span');
+              replyBadge.className = 'comment-card-reply-badge';
+              replyBadge.textContent = replyCount > 99 ? '99+' : String(replyCount);
+              replyBadge.setAttribute('aria-hidden', 'true');
+              openButton.append(replyBadge);
+            }
             openButton.addEventListener('click', (event) => {
               event.preventDefault();
               event.stopPropagation();
@@ -975,9 +1144,9 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
               const status = document.createElement('span');
               status.className = 'comment-status-label';
               status.textContent = thread.is_resolved ? '解決済み' : 'ピン未検出';
-              button.append(label, status, page, body, count, actions);
+              button.append(label, status, page, body, actions);
             } else {
-              button.append(label, page, body, count, actions);
+              button.append(label, page, body, actions);
             }
             button.addEventListener('click', () => {
               activateCommentFromList(thread);
@@ -1078,6 +1247,37 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
             showToast('クリップボードへコピーできませんでした。', 'error');
           }
         };
+        const markThreadRead = async (thread) => {
+          if (!thread || !thread.id || !thread.has_unread_activity) return;
+          const previousUnreadActivity = Boolean(thread.has_unread_activity);
+          const previousUnreadReplyCount = Number(thread.unread_reply_count || 0);
+          thread.has_unread_activity = false;
+          thread.unread_reply_count = 0;
+          renderList();
+          try {
+            const response = await fetch('<?= h(base_url('public-comments.php')) ?>', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+              body: JSON.stringify({
+                csrf_token: csrfToken,
+                token,
+                file: resolveThreadFile(thread) || activeFile,
+                guest_key: guestKey,
+                action: 'mark_read',
+                comment_id: thread.id
+              })
+            });
+            const result = await response.json();
+            if (!response.ok || !result.ok) throw new Error(result.message || '既読状態を更新できませんでした。');
+            applyPageCommentStates(result.page_states || {});
+            syncActivePageCommentStats();
+          } catch (error) {
+            thread.has_unread_activity = previousUnreadActivity;
+            thread.unread_reply_count = previousUnreadReplyCount;
+            renderList();
+            showToast(error.message || '既読状態を更新できませんでした。', 'error');
+          }
+        };
         const activateCommentFromList = async (thread) => {
           if (navigateToThreadPage(thread)) {
             return;
@@ -1092,6 +1292,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
           const response = await fetch(`<?= h(base_url('public-comments.php')) ?>?${params.toString()}`, { headers: { 'Accept': 'application/json' } });
           const result = await response.json();
           if (!response.ok || !result.ok) throw new Error(result.message || 'コメントを読み込めませんでした。');
+          applyPageCommentStates(result.page_states || {});
           threads = (result.threads || []).filter(isCurrentFileThread);
           renderList();
           scheduleMarkerRender();
@@ -1135,6 +1336,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
           const response = await fetch('<?= h(base_url('public-comments.php')) ?>', requestOptions);
           const result = await response.json();
           if (!response.ok || !result.ok) throw new Error(result.message || 'コメントを保存できませんでした。');
+          applyPageCommentStates(result.page_states || {});
           threads = (result.threads || []).filter(isCurrentFileThread);
           renderList();
           renderMarkers();
@@ -1173,6 +1375,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
             });
             const result = await response.json();
             if (!response.ok || !result.ok) throw new Error(result.message || 'コメントを削除できませんでした。');
+            applyPageCommentStates(result.page_states || {});
             const currentThreadId = result.focus_id || activeThreadId;
             if (result.focus_id) {
               activeThreadId = result.focus_id;
@@ -1220,6 +1423,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
             if (!response.ok || !result.ok) {
               throw new Error(result.message || 'コメント状態を更新できませんでした。');
             }
+            applyPageCommentStates(result.page_states || {});
             threads = (result.threads || []).filter(isCurrentFileThread);
             renderList();
             renderMarkers();
@@ -1324,6 +1528,7 @@ $previewUrl = base_url('public-preview?token=' . rawurlencode($token) . '&file='
           }
           const doc = iframe.contentDocument;
           if (!doc || !doc.defaultView) return;
+          installCommentHoverGuard(doc);
           doc.documentElement.classList.toggle('webpatch-comment-mode', commentMode);
           renderList();
           if (commentMode) {

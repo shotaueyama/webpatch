@@ -403,26 +403,42 @@ try {
         public_comments_response(['ok' => true, 'resolved' => $resolved, 'threads' => public_comments_payload((int) $project['id'], $clientShareId, $file, $guestKey)]);
     }
 
-    if ($parentId > 0) {
-        $stmt = db()->prepare('SELECT id FROM ' . table_name('comments') . ' WHERE id = ? AND project_id = ? AND client_share_id = ? AND file_path = ? AND parent_id IS NULL');
-        $stmt->execute([$parentId, (int) $project['id'], $clientShareId, $file]);
-        if (!$stmt->fetch()) {
-            throw new RuntimeException('返信先のコメントが見つかりません。');
+    $createdCommentId = 0;
+    $pdo = db();
+    $pdo->beginTransaction();
+    try {
+        if ($parentId > 0) {
+            $stmt = $pdo->prepare('SELECT id FROM ' . table_name('comments') . ' WHERE id = ? AND project_id = ? AND client_share_id = ? AND file_path = ? AND parent_id IS NULL');
+            $stmt->execute([$parentId, (int) $project['id'], $clientShareId, $file]);
+            if (!$stmt->fetch()) {
+                throw new RuntimeException('返信先のコメントが見つかりません。');
+            }
+            $stmt = $pdo->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, client_share_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)');
+            $stmt->execute([(int) $project['id'], $clientShareId, $file, $guestName, $guestKey, $parentId, $body]);
+            $createdCommentId = (int) $pdo->lastInsertId();
+            $createdId = $parentId;
+            reset_comment_ai_checks((int) $project['id'], null, $parentId);
+            public_save_comment_images((int) $project['id'], $createdCommentId);
+        } else {
+            if ($selector === '' || mb_strlen($selector) > 255) {
+                throw new RuntimeException('コメント対象を選択してください。');
+            }
+            $file = resolve_comment_file_for_selector($project, $file, $selector);
+            $stmt = $pdo->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, client_share_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?)');
+            $stmt->execute([(int) $project['id'], $clientShareId, $file, $selector, $viewportMode !== '' ? $viewportMode : null, $guestName, $guestKey, $body]);
+            $createdCommentId = (int) $pdo->lastInsertId();
+            $createdId = $createdCommentId;
+            public_save_comment_images((int) $project['id'], $createdCommentId);
         }
-        $stmt = db()->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, client_share_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)');
-        $stmt->execute([(int) $project['id'], $clientShareId, $file, $guestName, $guestKey, $parentId, $body]);
-        $createdId = $parentId;
-        reset_comment_ai_checks((int) $project['id'], null, $parentId);
-        public_save_comment_images((int) $project['id'], (int) db()->lastInsertId());
-    } else {
-        if ($selector === '' || mb_strlen($selector) > 255) {
-            throw new RuntimeException('コメント対象を選択してください。');
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
         }
-        $file = resolve_comment_file_for_selector($project, $file, $selector);
-        $stmt = db()->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, client_share_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, ?, ?, ?, NULL, ?, ?, NULL, ?)');
-        $stmt->execute([(int) $project['id'], $clientShareId, $file, $selector, $viewportMode !== '' ? $viewportMode : null, $guestName, $guestKey, $body]);
-        $createdId = (int) db()->lastInsertId();
-        public_save_comment_images((int) $project['id'], $createdId);
+        if ($createdCommentId > 0) {
+            delete_comment_images_for_comments((int) $project['id'], [$createdCommentId]);
+        }
+        throw $e;
     }
 
     public_comments_response(['ok' => true, 'created_id' => $createdId, 'threads' => public_comments_payload((int) $project['id'], $clientShareId, $file, $guestKey)]);

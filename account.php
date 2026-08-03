@@ -76,13 +76,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
         if ($action === 'ai_settings') {
-            foreach ($aiProviders as $provider => $definition) {
-                $model = (string) ($_POST[$provider . '_model'] ?? $definition['default_model']);
-                $apiKey = trim((string) ($_POST[$provider . '_api_key'] ?? ''));
-                $clearKey = isset($_POST[$provider . '_clear_key']);
-                save_ai_setting((int) $user['id'], $provider, $model, $apiKey, $clearKey);
+            $selectedProvider = normalize_ai_provider((string) ($_POST['ai_check_provider'] ?? ''));
+            if ($selectedProvider === '') {
+                throw new RuntimeException($appLanguage === 'en' ? 'Select a valid AI check provider.' : 'AI確認に使うプロバイダを選択してください。');
             }
-            save_ai_check_provider_for_user((int) $user['id'], (string) ($_POST['ai_check_provider'] ?? $aiCheckProvider));
+            $pdo = db();
+            $pdo->beginTransaction();
+            try {
+                foreach ($aiProviders as $provider => $definition) {
+                    $model = (string) ($_POST[$provider . '_model'] ?? $definition['default_model']);
+                    $apiKey = trim((string) ($_POST[$provider . '_api_key'] ?? ''));
+                    $clearKey = isset($_POST[$provider . '_clear_key']);
+                    save_ai_setting((int) $user['id'], $provider, $model, $apiKey, $clearKey);
+                }
+                if (ai_execution_setting_for_user_provider((int) $user['id'], $selectedProvider) === []) {
+                    $providerLabel = (string) ($aiProviders[$selectedProvider]['label'] ?? $selectedProvider);
+                    throw new RuntimeException(
+                        $appLanguage === 'en'
+                            ? $providerLabel . ' requires a saved API key before it can be used for AI checks.'
+                            : $providerLabel . 'をAI確認に使うにはAPIキーを設定してください。'
+                    );
+                }
+                save_ai_check_provider_for_user((int) $user['id'], $selectedProvider);
+                $pdo->commit();
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw $e;
+            }
 
             set_flash('success', $appLanguage === 'en' ? 'AI API settings saved.' : 'AI API設定を保存しました。');
             redirect_to('account.php');
@@ -143,15 +165,25 @@ $accountText = [
         'password_save' => 'パスワードを更新',
         'ai_title' => 'AI API設定',
         'ai_desc' => 'サポートチャット、シート編集、文字修正、修正確認、ノート執筆で利用します',
-        'ai_check_title' => 'AI確認に使うLLM',
-        'ai_check_desc' => 'コメントの反映確認では、ここで選んだLLMだけを使います',
-        'ai_check_label' => '利用するLLM',
+        'ai_check_title' => 'AI確認に使うプロバイダ',
+        'ai_check_desc' => 'コメントの反映確認に使うAIプロバイダを選択します',
+        'ai_check_label' => '利用するプロバイダ',
         'api_key_saved_suffix' => ' / APIキー保存済み',
         'api_key_missing_suffix' => ' / APIキー未設定',
-        'ai_check_help' => '選択したLLMのAPIキーが未設定の場合、AI確認時にエラーになります。',
+        'ai_check_help' => '選択したプロバイダで設定したAPIキーと利用モデルをAI確認に使用します。',
         'api_key_saved' => 'APIキー保存済み',
         'api_key_missing' => 'APIキー未設定',
         'model_label' => '利用モデル',
+        'model_refresh' => 'モデル一覧を更新',
+        'model_loading' => 'モデル一覧を取得しています...',
+        'model_loaded' => '%d件の推奨モデルを確認しました。',
+        'model_load_failed' => 'モデル一覧を取得できませんでした。',
+        'model_help' => 'WebPatchのAI確認・文字処理に適した最新の主要モデルだけを表示します。',
+        'model_compatible_group' => 'WebPatch推奨モデル',
+        'grade_budget_fast' => '格安・高速',
+        'grade_fast_value' => '高速・低コスト',
+        'grade_standard' => '標準',
+        'grade_quality' => '最高品質',
         'api_key_label' => 'APIキー',
         'api_key_change_placeholder' => '変更する場合のみ入力',
         'api_key_input_placeholder' => 'APIキーを入力',
@@ -215,15 +247,25 @@ $accountText = [
         'password_save' => 'Update password',
         'ai_title' => 'AI API Settings',
         'ai_desc' => 'Used for support chat, sheet editing, text edits, review checks, and note writing',
-        'ai_check_title' => 'LLM for AI checks',
-        'ai_check_desc' => 'Comment reflection checks use only the LLM selected here',
-        'ai_check_label' => 'LLM',
+        'ai_check_title' => 'AI check provider',
+        'ai_check_desc' => 'Choose the AI provider used to verify comment changes',
+        'ai_check_label' => 'Provider',
         'api_key_saved_suffix' => ' / API key saved',
         'api_key_missing_suffix' => ' / API key missing',
-        'ai_check_help' => 'If the selected LLM has no API key, AI checks will fail.',
+        'ai_check_help' => 'AI checks use the API key and model configured for the selected provider.',
         'api_key_saved' => 'API key saved',
         'api_key_missing' => 'API key missing',
         'model_label' => 'Model',
+        'model_refresh' => 'Refresh models',
+        'model_loading' => 'Loading available models...',
+        'model_loaded' => 'Confirmed %d recommended models.',
+        'model_load_failed' => 'Could not load the model list.',
+        'model_help' => 'Shows only current major models suited to WebPatch AI checks and text processing.',
+        'model_compatible_group' => 'WebPatch recommended models',
+        'grade_budget_fast' => 'Budget / Fast',
+        'grade_fast_value' => 'Fast / Lower cost',
+        'grade_standard' => 'Standard',
+        'grade_quality' => 'Highest quality',
         'api_key_label' => 'API key',
         'api_key_change_placeholder' => 'Enter only to change the saved key',
         'api_key_input_placeholder' => 'Enter API key',
@@ -261,6 +303,22 @@ $accountText = [
         'page_title' => 'Account Settings',
     ],
 ][$appLanguage] ?? [];
+
+$aiModelGradeKeys = [
+    'gpt-5.6-luna' => 'grade_budget_fast',
+    'gpt-5.6-terra' => 'grade_standard',
+    'gpt-5.6-sol' => 'grade_quality',
+    'gemini-3.5-flash-lite' => 'grade_budget_fast',
+    'gemini-3.6-flash' => 'grade_standard',
+    'gemini-3.5-flash' => 'grade_quality',
+    'grok-4.20-0309-non-reasoning' => 'grade_fast_value',
+    'grok-4.20-0309-reasoning' => 'grade_standard',
+    'grok-4.5' => 'grade_quality',
+];
+$aiModelGrades = [];
+foreach ($aiModelGradeKeys as $modelId => $gradeKey) {
+    $aiModelGrades[$modelId] = (string) ($accountText[$gradeKey] ?? '');
+}
 
 ob_start();
 ?>
@@ -421,11 +479,13 @@ ob_start();
             <div class="ai-provider-fields">
               <div class="field">
                 <label for="<?= h($provider) ?>_model"><?= h($accountText['model_label']) ?></label>
-                <select id="<?= h($provider) ?>_model" name="<?= h($provider) ?>_model">
+                <select id="<?= h($provider) ?>_model" name="<?= h($provider) ?>_model" data-ai-model-select="<?= h($provider) ?>">
                   <?php foreach ($definition['models'] as $modelId => $modelLabel): ?>
-                    <option value="<?= h($modelId) ?>" <?= (string) $setting['model'] === (string) $modelId ? 'selected' : '' ?>><?= h($modelLabel) ?></option>
+                    <?php $gradeLabel = (string) ($aiModelGrades[$modelId] ?? ''); ?>
+                    <option value="<?= h($modelId) ?>" <?= (string) $setting['model'] === (string) $modelId ? 'selected' : '' ?>><?= h($modelLabel . ($gradeLabel !== '' ? ' (' . $gradeLabel . ')' : '')) ?></option>
                   <?php endforeach; ?>
                 </select>
+                <p class="help-text" data-ai-model-result="<?= h($provider) ?>"><?= h($accountText['model_help']) ?></p>
               </div>
               <div class="field">
                 <label for="<?= h($provider) ?>_api_key"><?= h($accountText['api_key_label']) ?></label>
@@ -437,6 +497,7 @@ ob_start();
               <span><?= h($accountText['clear_api_key']) ?></span>
             </label>
             <div class="ai-provider-actions">
+              <button class="secondary-button ai-test-button" type="button" data-ai-model-refresh="<?= h($provider) ?>"><?= h($accountText['model_refresh']) ?></button>
               <button class="secondary-button ai-test-button" type="button" data-ai-test-provider="<?= h($provider) ?>"><?= h($accountText['test_connection']) ?></button>
               <div class="ai-test-result" data-ai-test-result="<?= h($provider) ?>" role="status" aria-live="polite"></div>
             </div>
@@ -529,6 +590,7 @@ ob_start();
   (() => {
     const csrfToken = <?= json_encode(csrf_token(), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
     const endpoint = <?= json_encode(base_url('ai-test-connection.php'), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
+    const modelsEndpoint = <?= json_encode(base_url('ai-models.php'), JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
     const copy = <?= json_encode([
         'checking' => $accountText['checking'],
         'checkingConnection' => $accountText['checking_connection'],
@@ -536,15 +598,94 @@ ob_start();
         'connectionFailed' => $accountText['connection_failed'],
         'testConnection' => $accountText['test_connection'],
         'modelUsed' => $accountText['model_used'],
+        'modelLoading' => $accountText['model_loading'],
+        'modelLoaded' => $accountText['model_loaded'],
+        'modelLoadFailed' => $accountText['model_load_failed'],
+        'modelRefresh' => $accountText['model_refresh'],
+        'modelCompatibleGroup' => $accountText['model_compatible_group'],
+        'modelGrades' => $aiModelGrades,
     ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) ?>;
     const buttons = Array.from(document.querySelectorAll('[data-ai-test-provider]'));
+    const modelRefreshButtons = Array.from(document.querySelectorAll('[data-ai-model-refresh]'));
     const setResult = (provider, message, state = '') => {
       const box = document.querySelector(`[data-ai-test-result="${provider}"]`);
       if (!box) return;
       box.textContent = message || '';
       box.dataset.state = state;
     };
+    const setModelResult = (provider, message, state = '') => {
+      const box = document.querySelector(`[data-ai-model-result="${provider}"]`);
+      if (!box) return;
+      box.textContent = message || '';
+      box.dataset.state = state;
+    };
+    const refreshModels = async (provider, button = null, forceRefresh = false) => {
+      const card = document.querySelector(`[data-ai-provider-card="${provider}"]`);
+      const select = card ? card.querySelector(`[data-ai-model-select="${provider}"]`) : null;
+      const apiKey = card ? card.querySelector(`[name="${provider}_api_key"]`) : null;
+      if (!select) return;
+      const selectedModel = select.value;
+      const previousText = button ? button.textContent : '';
+      if (button) {
+        button.disabled = true;
+        button.textContent = copy.checking;
+      }
+      setModelResult(provider, copy.modelLoading, 'pending');
+      try {
+        const response = await fetch(modelsEndpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+          body: JSON.stringify({
+            csrf_token: csrfToken,
+            provider,
+            api_key: apiKey ? apiKey.value : '',
+            refresh: forceRefresh
+          })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok || !Array.isArray(result.models)) {
+          throw new Error(result.message || copy.modelLoadFailed);
+        }
+        const fragment = document.createDocumentFragment();
+        const compatibleGroup = document.createElement('optgroup');
+        compatibleGroup.label = copy.modelCompatibleGroup;
+        const compatibleIds = new Set();
+        result.models.forEach((model) => {
+          const id = String(model.id || '').trim();
+          if (!id) return;
+          const option = document.createElement('option');
+          option.value = id;
+          const grade = String(copy.modelGrades[id] || '');
+          option.textContent = String(model.label || id) + (grade ? ` (${grade})` : '');
+          if (model.compatible) {
+            compatibleIds.add(id);
+            compatibleGroup.append(option);
+          }
+        });
+        if (compatibleGroup.children.length > 0) fragment.append(compatibleGroup);
+        select.replaceChildren(fragment);
+        const fallbackModel = compatibleIds.has(String(result.default_model || ''))
+          ? String(result.default_model)
+          : (compatibleGroup.querySelector('option')?.value || '');
+        select.value = compatibleIds.has(selectedModel) ? selectedModel : fallbackModel;
+        setModelResult(
+          provider,
+          copy.modelLoaded.replace('%d', String(result.compatible_count || compatibleIds.size)),
+          'success'
+        );
+      } catch (error) {
+        setModelResult(provider, error.message || copy.modelLoadFailed, 'error');
+      } finally {
+        if (button) {
+          button.disabled = false;
+          button.textContent = previousText || copy.modelRefresh;
+        }
+      }
+    };
 
+    modelRefreshButtons.forEach((button) => {
+      button.addEventListener('click', () => refreshModels(button.dataset.aiModelRefresh || '', button, true));
+    });
     buttons.forEach((button) => {
       button.addEventListener('click', async () => {
         const provider = button.dataset.aiTestProvider || '';

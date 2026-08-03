@@ -6,7 +6,7 @@ const WEBPATCH_MAX_UPLOAD_BYTES = 104857600;
 const WEBPATCH_MAX_EXTRACTED_BYTES = 104857600;
 const WEBPATCH_SESSION_SECONDS = 259200;
 const WEBPATCH_MAX_USERS = 5;
-const WEBPATCH_MAX_URL_IMPORTS = 50;
+const WEBPATCH_MAX_URL_IMPORTS = 100;
 const WEBPATCH_MAX_URL_HTML_BYTES = 10485760;
 const WEBPATCH_MAX_URL_ASSET_BYTES = 52428800;
 const WEBPATCH_URL_FETCH_TIMEOUT = 10;
@@ -431,10 +431,13 @@ function is_project_sidebar_page_file(string $path): bool
 
 function project_sidebar_html_files(array $project): array
 {
-    $files = array_values(array_filter(
-        project_html_files($project),
-        static fn (string $file): bool => is_project_sidebar_page_file($file)
-    ));
+    $files = project_html_files($project);
+    if (project_is_url_source($project)) {
+        $map = url_project_map($project);
+        $mappedFiles = array_fill_keys(array_map('strval', array_keys((array) ($map['file_to_url'] ?? []))), true);
+        $files = array_values(array_filter($files, static fn (string $file): bool => isset($mappedFiles[$file])));
+    }
+    $files = array_values(array_filter($files, static fn (string $file): bool => is_project_sidebar_page_file($file)));
 
     if ($files === [] && !empty($project['entry_file']) && is_html_file((string) $project['entry_file'])) {
         $files[] = (string) $project['entry_file'];
@@ -500,18 +503,52 @@ function save_project_page_order(array $project, array $requestedOrder): array
     }
     $ordered = array_merge(array_values(array_unique($ordered)), array_keys($visibleLookup));
 
-    $dir = project_webpatch_metadata_dir($project);
-    if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) {
-        throw new RuntimeException('ページ順の保存ディレクトリを作成できませんでした。');
-    }
-    $path = project_page_order_path($project);
-    $json = json_encode(['files' => $ordered], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
-    if ($json === false || file_put_contents($path, $json, LOCK_EX) === false) {
-        throw new RuntimeException('ページ順を保存できませんでした。');
-    }
-    chmod($path, 0640);
+    write_project_page_order($project, $ordered);
 
     return $ordered;
+}
+
+function atomic_write_project_file(string $path, string $contents, string $errorMessage): void
+{
+    $dir = dirname($path);
+    if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) {
+        throw new RuntimeException($errorMessage);
+    }
+
+    $temporary = tempnam($dir, '.webpatch-write-');
+    if ($temporary === false) {
+        throw new RuntimeException($errorMessage);
+    }
+
+    try {
+        if (file_put_contents($temporary, $contents, LOCK_EX) === false) {
+            throw new RuntimeException($errorMessage);
+        }
+        chmod($temporary, 0640);
+        if (!rename($temporary, $path)) {
+            throw new RuntimeException($errorMessage);
+        }
+    } finally {
+        if (is_file($temporary)) {
+            @unlink($temporary);
+        }
+    }
+}
+
+function write_project_page_order(array $project, array $files): void
+{
+    $ordered = [];
+    foreach ($files as $file) {
+        $file = normalize_zip_path((string) $file);
+        if ($file !== '' && !isset($ordered[$file])) {
+            $ordered[$file] = true;
+        }
+    }
+    $json = json_encode(['files' => array_keys($ordered)], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    if ($json === false) {
+        throw new RuntimeException('ページ順を保存できませんでした。');
+    }
+    atomic_write_project_file(project_page_order_path($project), $json, 'ページ順を保存できませんでした。');
 }
 
 function remap_project_page_order_files(array $oldOrder, array $newHtmlFiles): array
@@ -558,28 +595,37 @@ function resolve_comment_file_for_selector(array $project, string $file, string 
     return $file;
 }
 
-function page_comment_marker_states_for_project(int $projectId, ?int $clientShareId = null, bool $normalOnly = false): array
+function page_comment_marker_states_for_project(int $projectId, ?int $clientShareId = null, bool $normalOnly = false, ?int $unreadUserId = null, bool $includeResolved = false): array
 {
     ensure_comment_confirmation_columns();
     ensure_comment_client_share_column();
-    $where = 'WHERE project_id = ?
-            AND parent_id IS NULL
-            AND resolved_at IS NULL';
+    $where = 'WHERE root.project_id = ?
+            AND root.parent_id IS NULL';
     $params = [$projectId];
+    if ($unreadUserId === null && !$includeResolved) {
+        $where .= ' AND root.resolved_at IS NULL';
+    }
     if ($clientShareId !== null) {
-        $where .= ' AND client_share_id = ?';
+        $where .= ' AND root.client_share_id = ?';
         $params[] = $clientShareId;
     } elseif ($normalOnly) {
-        $where .= ' AND client_share_id IS NULL';
+        $where .= ' AND root.client_share_id IS NULL';
     }
     $stmt = db()->prepare(
-        'SELECT file_path,
-                COUNT(*) AS open_count,
-                SUM(CASE WHEN confirmation_pending_at IS NULL THEN 1 ELSE 0 END) AS needs_attention_count,
-                SUM(CASE WHEN confirmation_pending_at IS NOT NULL THEN 1 ELSE 0 END) AS pending_count
-           FROM ' . table_name('comments') . '
+        'SELECT root.file_path,
+                COUNT(DISTINCT root.id) AS root_count,
+                COUNT(DISTINCT CASE WHEN root.resolved_at IS NULL THEN root.id END) AS open_count,
+                COUNT(DISTINCT reply.id) AS reply_count,
+                COUNT(DISTINCT CASE WHEN root.resolved_at IS NULL THEN reply.id END) AS open_reply_count,
+                COUNT(DISTINCT CASE WHEN root.resolved_at IS NULL AND root.confirmation_pending_at IS NULL THEN root.id END) AS needs_attention_count,
+                COUNT(DISTINCT CASE WHEN root.resolved_at IS NULL AND root.confirmation_pending_at IS NOT NULL THEN root.id END) AS pending_count,
+                COUNT(DISTINCT CASE WHEN root.resolved_at IS NOT NULL THEN root.id END) AS resolved_count
+           FROM ' . table_name('comments') . ' root
+           LEFT JOIN ' . table_name('comments') . ' reply
+             ON reply.project_id = root.project_id
+            AND reply.parent_id = root.id
           ' . $where . '
-          GROUP BY file_path'
+          GROUP BY root.file_path'
     );
     $stmt->execute($params);
 
@@ -587,21 +633,106 @@ function page_comment_marker_states_for_project(int $projectId, ?int $clientShar
     foreach ($stmt->fetchAll() as $row) {
         $needsAttention = (int) $row['needs_attention_count'];
         $pending = (int) $row['pending_count'];
+        $roots = (int) $row['root_count'];
         $open = (int) $row['open_count'];
+        $replies = (int) $row['reply_count'];
+        $openReplies = (int) $row['open_reply_count'];
+        $resolved = (int) $row['resolved_count'];
+        $total = $roots + $replies;
+        $state = 'completed';
         if ($needsAttention > 0) {
-            $states[(string) $row['file_path']] = [
-                'state' => 'attention',
-                'count' => $open,
-            ];
-            continue;
+            $state = 'attention';
+        } elseif ($pending > 0) {
+            $state = 'pending';
         }
-        if ($pending > 0) {
-            $states[(string) $row['file_path']] = [
-                'state' => 'pending',
-                'count' => $pending,
-            ];
+        $states[(string) $row['file_path']] = [
+            'state' => $state,
+            'count' => $total,
+            'open_count' => $open,
+            'open_reply_count' => $openReplies,
+            'confirmation_count' => $pending,
+            'resolved_count' => $resolved,
+            'reply_count' => $replies,
+            'unread_count' => 0,
+        ];
+    }
+
+    if ($unreadUserId !== null && $states !== []) {
+        ensure_comment_thread_reads_table();
+        $unreadStmt = db()->prepare(
+            'SELECT root.file_path,
+                    COUNT(DISTINCT root.id) AS unread_count,
+                    COUNT(DISTINCT CASE WHEN activity.parent_id = root.id THEN activity.id END) AS unread_reply_count
+               FROM ' . table_name('comments') . ' root
+               INNER JOIN ' . table_name('comments') . ' activity
+                 ON activity.project_id = root.project_id
+                AND (activity.id = root.id OR activity.parent_id = root.id)
+               LEFT JOIN ' . table_name('comment_thread_reads') . ' thread_read
+                 ON thread_read.project_id = root.project_id
+                AND thread_read.thread_id = root.id
+                AND thread_read.user_id = ?
+              WHERE root.project_id = ?
+                AND root.parent_id IS NULL
+                AND COALESCE(activity.user_id, 0) <> ?
+                AND (thread_read.last_read_at IS NULL OR activity.created_at > thread_read.last_read_at)
+              GROUP BY root.file_path'
+        );
+        $unreadStmt->execute([$unreadUserId, $projectId, $unreadUserId]);
+        foreach ($unreadStmt->fetchAll() as $row) {
+            $file = (string) $row['file_path'];
+            if (!isset($states[$file])) {
+                continue;
+            }
+            $states[$file]['has_unread'] = true;
+            $states[$file]['unread_count'] = (int) $row['unread_count'];
+            $states[$file]['unread_reply_count'] = (int) $row['unread_reply_count'];
         }
     }
+
+    return $states;
+}
+
+function page_comment_marker_states_for_public_project(int $projectId, int $publicLinkId, string $guestKey): array
+{
+    $states = page_comment_marker_states_for_project($projectId, null, true, null, true);
+    if ($states === [] || $publicLinkId <= 0 || $guestKey === '') {
+        return $states;
+    }
+
+    ensure_public_comment_thread_reads_table();
+    $guestKeyHash = hash('sha256', $guestKey);
+    $stmt = db()->prepare(
+        'SELECT root.file_path,
+                COUNT(DISTINCT root.id) AS unread_count,
+                COUNT(DISTINCT CASE WHEN activity.parent_id = root.id THEN activity.id END) AS unread_reply_count
+           FROM ' . table_name('comments') . ' root
+           INNER JOIN ' . table_name('comments') . ' activity
+             ON activity.project_id = root.project_id
+            AND activity.client_share_id IS NULL
+            AND (activity.id = root.id OR activity.parent_id = root.id)
+           LEFT JOIN ' . table_name('public_comment_thread_reads') . ' thread_read
+             ON thread_read.public_link_id = ?
+            AND thread_read.project_id = root.project_id
+            AND thread_read.thread_id = root.id
+            AND thread_read.guest_key_hash = ?
+          WHERE root.project_id = ?
+            AND root.parent_id IS NULL
+            AND root.client_share_id IS NULL
+            AND COALESCE(activity.guest_key, \'\') <> ?
+            AND (thread_read.last_read_at IS NULL OR activity.created_at > thread_read.last_read_at)
+          GROUP BY root.file_path'
+    );
+    $stmt->execute([$publicLinkId, $guestKeyHash, $projectId, $guestKey]);
+    foreach ($stmt->fetchAll() as $row) {
+        $file = (string) $row['file_path'];
+        if (!isset($states[$file])) {
+            continue;
+        }
+        $states[$file]['has_unread'] = true;
+        $states[$file]['unread_count'] = (int) $row['unread_count'];
+        $states[$file]['unread_reply_count'] = (int) $row['unread_reply_count'];
+    }
+
     return $states;
 }
 
@@ -653,7 +784,7 @@ function public_project_for_token(string $token): ?array
     }
 
     $stmt = db()->prepare(
-        'SELECT p.*, pl.token AS public_token, pl.enabled AS public_link_enabled
+        'SELECT p.*, pl.id AS public_link_id, pl.token AS public_token, pl.enabled AS public_link_enabled
            FROM ' . table_name('project_public_links') . ' pl
            INNER JOIN ' . table_name('projects') . ' p ON p.id = pl.project_id
           WHERE pl.token = ? AND pl.enabled = 1
@@ -1395,36 +1526,29 @@ function ai_provider_definitions(): array
         'openai' => [
             'label' => 'OpenAI',
             'models' => [
-                'gpt-5.5' => 'GPT-5.5',
-                'gpt-5.5-pro' => 'GPT-5.5 pro',
-                'gpt-5.4' => 'GPT-5.4',
-                'gpt-5.4-mini' => 'GPT-5.4 mini',
-                'gpt-4.1' => 'GPT-4.1',
+                'gpt-5.6-luna' => 'GPT-5.6 Luna',
+                'gpt-5.6-terra' => 'GPT-5.6 Terra',
+                'gpt-5.6-sol' => 'GPT-5.6 Sol',
             ],
-            'default_model' => 'gpt-5.5',
+            'default_model' => 'gpt-5.6-terra',
         ],
         'gemini' => [
             'label' => 'Gemini',
             'models' => [
-                'gemini-3.1-pro-preview' => 'Gemini 3.1 Pro Preview',
-                'gemini-3-flash-preview' => 'Gemini 3 Flash Preview',
-                'gemini-3.1-flash-lite' => 'Gemini 3.1 Flash-Lite',
-                'gemini-2.5-pro' => 'Gemini 2.5 Pro',
-                'gemini-2.5-flash' => 'Gemini 2.5 Flash',
+                'gemini-3.5-flash-lite' => 'Gemini 3.5 Flash-Lite',
+                'gemini-3.6-flash' => 'Gemini 3.6 Flash',
+                'gemini-3.5-flash' => 'Gemini 3.5 Flash',
             ],
-            'default_model' => 'gemini-3.1-pro-preview',
+            'default_model' => 'gemini-3.6-flash',
         ],
         'grok' => [
             'label' => 'Grok',
             'models' => [
-                'grok-4.3' => 'Grok 4.3',
-                'grok-4.3-latest' => 'Grok 4.3 latest',
-                'grok-latest' => 'Grok latest',
-                'grok-4.20-multi-agent-0309' => 'Grok 4.20 Multi-Agent',
-                'grok-4.20-0309-reasoning' => 'Grok 4.20 Reasoning',
                 'grok-4.20-0309-non-reasoning' => 'Grok 4.20 Non-Reasoning',
+                'grok-4.20-0309-reasoning' => 'Grok 4.20 Reasoning',
+                'grok-4.5' => 'Grok 4.5',
             ],
-            'default_model' => 'grok-4.3',
+            'default_model' => 'grok-4.20-0309-reasoning',
         ],
     ];
 }
@@ -1434,13 +1558,28 @@ function normalize_ai_provider(string $provider): string
     return array_key_exists($provider, ai_provider_definitions()) ? $provider : '';
 }
 
+function ai_model_is_webpatch_compatible(string $provider, string $model): bool
+{
+    $provider = normalize_ai_provider($provider);
+    $model = trim($model);
+    if ($provider === '' || $model === '') {
+        return false;
+    }
+    $definitions = ai_provider_definitions();
+    return array_key_exists($model, $definitions[$provider]['models'] ?? []);
+}
+
 function normalize_ai_model(string $provider, string $model): string
 {
     $providers = ai_provider_definitions();
     if (!isset($providers[$provider])) {
         return '';
     }
-    return array_key_exists($model, $providers[$provider]['models']) ? $model : (string) $providers[$provider]['default_model'];
+    $model = trim($model);
+    if (array_key_exists($model, $providers[$provider]['models'])) {
+        return $model;
+    }
+    return (string) $providers[$provider]['default_model'];
 }
 
 function ensure_ai_settings_table(): void
@@ -1534,11 +1673,25 @@ function ai_settings_for_user(int $userId): array
         if ($provider === '') {
             continue;
         }
-        $settings[$provider]['model'] = normalize_ai_model($provider, (string) $row['model']);
+        $settings[$provider]['model'] = normalize_persisted_ai_model($userId, $provider, (string) $row['model']);
         $settings[$provider]['api_key_hint'] = (string) $row['api_key_hint'];
         $settings[$provider]['has_api_key'] = (string) ($row['api_key_cipher'] ?? '') !== '';
     }
     return $settings;
+}
+
+function normalize_persisted_ai_model(int $userId, string $provider, string $model): string
+{
+    $normalized = normalize_ai_model($provider, $model);
+    if ($normalized !== trim($model)) {
+        $stmt = db()->prepare(
+            'UPDATE ' . table_name('ai_settings') . '
+                SET model = ?
+              WHERE user_id = ? AND provider = ?'
+        );
+        $stmt->execute([$normalized, $userId, $provider]);
+    }
+    return $normalized;
 }
 
 function save_ai_setting(int $userId, string $provider, string $model, string $apiKey, bool $clearKey = false): void
@@ -1563,6 +1716,8 @@ function save_ai_setting(int $userId, string $provider, string $model, string $a
         $cipher = encrypt_ai_api_key($apiKey);
         $hint = ai_key_hint($apiKey);
     }
+    $effectiveApiKey = $clearKey ? '' : ($apiKey !== '' ? $apiKey : decrypt_ai_api_key($cipher));
+    $model = resolve_available_ai_model($provider, $model, $effectiveApiKey);
 
     $stmt = db()->prepare(
         'INSERT INTO ' . table_name('ai_settings') . ' (user_id, provider, api_key_cipher, api_key_hint, model)
@@ -1570,6 +1725,208 @@ function save_ai_setting(int $userId, string $provider, string $model, string $a
          ON DUPLICATE KEY UPDATE api_key_cipher = VALUES(api_key_cipher), api_key_hint = VALUES(api_key_hint), model = VALUES(model)'
     );
     $stmt->execute([$userId, $provider, $cipher, $hint, $model]);
+}
+
+function ai_api_key_for_user(int $userId, string $provider): string
+{
+    ensure_ai_settings_table();
+    $stmt = db()->prepare('SELECT api_key_cipher FROM ' . table_name('ai_settings') . ' WHERE user_id = ? AND provider = ? LIMIT 1');
+    $stmt->execute([$userId, $provider]);
+    $row = $stmt->fetch();
+    return $row ? decrypt_ai_api_key($row['api_key_cipher'] ?? null) : '';
+}
+
+function ai_model_list_http_json(string $url, array $headers, int $timeout = 20): array
+{
+    $ch = curl_init($url);
+    if ($ch === false) {
+        throw new RuntimeException('モデル一覧の取得を初期化できませんでした。');
+    }
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER => array_merge(['Accept: application/json'], $headers),
+        CURLOPT_TIMEOUT => $timeout,
+        CURLOPT_CONNECTTIMEOUT => 8,
+    ]);
+    $body = curl_exec($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $error = curl_error($ch);
+    curl_close($ch);
+
+    if ($body === false || $body === '') {
+        throw new RuntimeException($error !== '' ? $error : 'モデル一覧のレスポンスが空です。');
+    }
+    $data = json_decode((string) $body, true);
+    if (!is_array($data)) {
+        throw new RuntimeException('モデル一覧のレスポンスを解析できませんでした。');
+    }
+    if ($status < 200 || $status >= 300) {
+        $message = $data['error']['message'] ?? $data['message'] ?? 'モデル一覧APIがエラーを返しました。';
+        throw new RuntimeException((string) $message);
+    }
+    return $data;
+}
+
+function available_ai_models(string $provider, string $apiKey): array
+{
+    $provider = normalize_ai_provider($provider);
+    if ($provider === '' || trim($apiKey) === '') {
+        throw new RuntimeException('APIキーが未設定です。');
+    }
+
+    $modelIds = [];
+    if ($provider === 'openai') {
+        $data = ai_model_list_http_json('https://api.openai.com/v1/models', ['Authorization: Bearer ' . $apiKey]);
+        foreach (($data['data'] ?? []) as $model) {
+            $id = trim((string) ($model['id'] ?? ''));
+            if ($id !== '') {
+                $modelIds[$id] = true;
+            }
+        }
+    } elseif ($provider === 'gemini') {
+        $pageToken = '';
+        for ($page = 0; $page < 10; $page++) {
+            $url = 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000';
+            if ($pageToken !== '') {
+                $url .= '&pageToken=' . rawurlencode($pageToken);
+            }
+            $data = ai_model_list_http_json($url, ['x-goog-api-key: ' . $apiKey]);
+            foreach (($data['models'] ?? []) as $model) {
+                $methods = is_array($model['supportedGenerationMethods'] ?? null) ? $model['supportedGenerationMethods'] : [];
+                if (!in_array('generateContent', $methods, true)) {
+                    continue;
+                }
+                $id = preg_replace('#^models/#', '', trim((string) ($model['name'] ?? '')));
+                if ($id !== '') {
+                    $modelIds[$id] = true;
+                }
+            }
+            $pageToken = trim((string) ($data['nextPageToken'] ?? ''));
+            if ($pageToken === '') {
+                break;
+            }
+        }
+    } else {
+        try {
+            $data = ai_model_list_http_json('https://api.x.ai/v1/language-models', ['Authorization: Bearer ' . $apiKey]);
+            foreach (($data['models'] ?? []) as $model) {
+                $id = trim((string) ($model['id'] ?? ''));
+                if ($id !== '') {
+                    $modelIds[$id] = true;
+                }
+                foreach (($model['aliases'] ?? []) as $alias) {
+                    $alias = trim((string) $alias);
+                    if ($alias !== '') {
+                        $modelIds[$alias] = true;
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            $data = ai_model_list_http_json('https://api.x.ai/v1/models', ['Authorization: Bearer ' . $apiKey]);
+            foreach (($data['data'] ?? []) as $model) {
+                $id = trim((string) ($model['id'] ?? ''));
+                if ($id !== '') {
+                    $modelIds[$id] = true;
+                }
+                foreach (($model['aliases'] ?? []) as $alias) {
+                    $alias = trim((string) $alias);
+                    if ($alias !== '') {
+                        $modelIds[$alias] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if ($modelIds === []) {
+        throw new RuntimeException('利用可能なモデルが見つかりませんでした。');
+    }
+
+    $definitions = ai_provider_definitions();
+    $knownLabels = $definitions[$provider]['models'] ?? [];
+    $ids = array_values(array_filter(
+        array_keys($knownLabels),
+        static fn (string $id): bool => isset($modelIds[$id])
+    ));
+    if ($ids === []) {
+        throw new RuntimeException('WebPatch向けの推奨モデルが、このAPIキーでは利用できません。');
+    }
+    return array_map(static function (string $id) use ($knownLabels, $provider): array {
+        return [
+            'id' => $id,
+            'label' => $knownLabels[$id] ?? $id,
+            'compatible' => ai_model_is_webpatch_compatible($provider, $id),
+        ];
+    }, $ids);
+}
+
+function ai_model_cache_key(string $provider, string $apiKey): string
+{
+    $provider = normalize_ai_provider($provider);
+    $definitions = ai_provider_definitions();
+    $curatedModels = implode("\0", array_keys($definitions[$provider]['models'] ?? []));
+    return hash('sha256', 'curated-v2' . "\0" . $provider . "\0" . $curatedModels . "\0" . $apiKey);
+}
+
+function cached_available_ai_models(string $provider, string $apiKey, int $ttl = 600): ?array
+{
+    $key = ai_model_cache_key($provider, $apiKey);
+    $cached = $_SESSION['ai_model_lists'][$key] ?? null;
+    if (!is_array($cached) || (int) ($cached['expires_at'] ?? 0) < time() || !is_array($cached['models'] ?? null)) {
+        unset($_SESSION['ai_model_lists'][$key]);
+        return null;
+    }
+    return $cached['models'];
+}
+
+function cache_available_ai_models(string $provider, string $apiKey, array $models, int $ttl = 600): void
+{
+    $_SESSION['ai_model_lists'][ai_model_cache_key($provider, $apiKey)] = [
+        'expires_at' => time() + max(60, $ttl),
+        'models' => $models,
+    ];
+    if (count($_SESSION['ai_model_lists']) > 12) {
+        uasort($_SESSION['ai_model_lists'], static fn (array $a, array $b): int => (int) ($a['expires_at'] ?? 0) <=> (int) ($b['expires_at'] ?? 0));
+        $_SESSION['ai_model_lists'] = array_slice($_SESSION['ai_model_lists'], -12, null, true);
+    }
+}
+
+function preferred_available_ai_model(string $provider, array $models, string $current = ''): string
+{
+    $compatibleIds = [];
+    foreach ($models as $availableModel) {
+        $id = trim((string) ($availableModel['id'] ?? ''));
+        if ($id !== '' && !empty($availableModel['compatible'])) {
+            $compatibleIds[$id] = true;
+        }
+    }
+    if ($current !== '' && isset($compatibleIds[$current])) {
+        return $current;
+    }
+
+    $definitions = ai_provider_definitions();
+    foreach (array_keys($definitions[$provider]['models'] ?? []) as $preferred) {
+        if (isset($compatibleIds[$preferred])) {
+            return (string) $preferred;
+        }
+    }
+
+    return (string) (array_key_first($compatibleIds) ?? '');
+}
+
+function resolve_available_ai_model(string $provider, string $model, string $apiKey): string
+{
+    $normalized = normalize_ai_model($provider, $model);
+    if ($apiKey === '') {
+        return $normalized;
+    }
+
+    $models = cached_available_ai_models($provider, $apiKey);
+    if ($models === null) {
+        return $normalized;
+    }
+
+    return preferred_available_ai_model($provider, $models, $normalized) ?: $normalized;
 }
 
 function normalize_git_provider(string $provider): string
@@ -1820,7 +2177,7 @@ function save_ai_check_provider_for_user(int $userId, string $provider): void
 {
     $provider = normalize_ai_provider($provider);
     if ($provider === '') {
-        throw new RuntimeException('AI確認で使うLLMが不正です。');
+        throw new RuntimeException('AI確認で使うプロバイダが不正です。');
     }
     ensure_ai_user_preferences_table();
     $stmt = db()->prepare(
@@ -1934,6 +2291,8 @@ function ensure_ai_check_jobs_table(): void
             public_id VARCHAR(32) NOT NULL,
             project_id BIGINT UNSIGNED NOT NULL,
             user_id BIGINT UNSIGNED NOT NULL,
+            ai_provider VARCHAR(32) NULL,
+            ai_model VARCHAR(120) NULL,
             status VARCHAR(20) NOT NULL DEFAULT \'queued\',
             total_count INT UNSIGNED NOT NULL DEFAULT 0,
             processed_count INT UNSIGNED NOT NULL DEFAULT 0,
@@ -1948,6 +2307,21 @@ function ensure_ai_check_jobs_table(): void
             KEY idx_status (status)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
     );
+    $columns = [
+        'ai_provider' => 'ALTER TABLE `' . table_name('ai_check_jobs') . '` ADD COLUMN ai_provider VARCHAR(32) NULL AFTER user_id',
+        'ai_model' => 'ALTER TABLE `' . table_name('ai_check_jobs') . '` ADD COLUMN ai_model VARCHAR(120) NULL AFTER ai_provider',
+    ];
+    foreach ($columns as $column => $sql) {
+        if (!table_column_exists('ai_check_jobs', $column)) {
+            try {
+                db()->exec($sql);
+            } catch (PDOException $e) {
+                if ((int) ($e->errorInfo[1] ?? 0) !== 1060) {
+                    throw $e;
+                }
+            }
+        }
+    }
     $done = true;
 }
 
@@ -2010,6 +2384,31 @@ function ensure_comment_thread_reads_table(): void
             UNIQUE KEY uniq_thread_user (thread_id, user_id),
             KEY idx_project_user (project_id, user_id),
             KEY idx_thread_id (thread_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
+    );
+    $done = true;
+}
+
+function ensure_public_comment_thread_reads_table(): void
+{
+    static $done = false;
+    if ($done) {
+        return;
+    }
+
+    db()->exec(
+        'CREATE TABLE IF NOT EXISTS ' . table_name('public_comment_thread_reads') . ' (
+            id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+            public_link_id BIGINT UNSIGNED NOT NULL,
+            project_id BIGINT UNSIGNED NOT NULL,
+            thread_id BIGINT UNSIGNED NOT NULL,
+            guest_key_hash CHAR(64) NOT NULL,
+            last_read_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uniq_public_thread_guest (public_link_id, thread_id, guest_key_hash),
+            KEY idx_public_project_guest (public_link_id, project_id, guest_key_hash),
+            KEY idx_public_thread (thread_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci'
     );
     $done = true;
@@ -2081,9 +2480,10 @@ function ai_execution_settings_for_user(int $userId): array
         if ($apiKey === '') {
             continue;
         }
+        $model = normalize_persisted_ai_model($userId, $provider, (string) $row['model']);
         $rows[$provider] = [
             'provider' => $provider,
-            'model' => normalize_ai_model($provider, (string) $row['model']),
+            'model' => resolve_available_ai_model($provider, $model, $apiKey),
             'api_key' => $apiKey,
         ];
     }
@@ -2097,11 +2497,14 @@ function ai_execution_settings_for_user(int $userId): array
     return $ordered;
 }
 
-function ai_check_execution_settings_for_user(int $userId): array
+function ai_execution_setting_for_user_provider(int $userId, string $provider, ?string $modelOverride = null): array
 {
     ensure_ai_settings_table();
-    $provider = ai_check_provider_for_user($userId);
-    $stmt = db()->prepare('SELECT provider, api_key_cipher, model FROM ' . table_name('ai_settings') . ' WHERE user_id = ? AND provider = ? LIMIT 1');
+    $provider = normalize_ai_provider($provider);
+    if ($provider === '') {
+        return [];
+    }
+    $stmt = db()->prepare('SELECT api_key_cipher, model FROM ' . table_name('ai_settings') . ' WHERE user_id = ? AND provider = ? LIMIT 1');
     $stmt->execute([$userId, $provider]);
     $row = $stmt->fetch();
     if (!$row) {
@@ -2111,11 +2514,20 @@ function ai_check_execution_settings_for_user(int $userId): array
     if ($apiKey === '') {
         return [];
     }
-    return [[
+    $storedModel = normalize_persisted_ai_model($userId, $provider, (string) $row['model']);
+    $model = $modelOverride === null ? $storedModel : normalize_ai_model($provider, $modelOverride);
+    return [
         'provider' => $provider,
-        'model' => normalize_ai_model($provider, (string) $row['model']),
+        'model' => resolve_available_ai_model($provider, $model, $apiKey),
         'api_key' => $apiKey,
-    ]];
+    ];
+}
+
+function ai_check_execution_settings_for_user(int $userId): array
+{
+    $provider = ai_check_provider_for_user($userId);
+    $setting = ai_execution_setting_for_user_provider($userId, $provider);
+    return $setting === [] ? [] : [$setting];
 }
 
 function ensure_project_user_settings_table(): void
@@ -2648,6 +3060,63 @@ function url_project_map(array $project): array
     return $map;
 }
 
+function with_url_project_lock(array $project, callable $callback): mixed
+{
+    $dir = project_webpatch_metadata_dir($project);
+    if (!is_dir($dir) && !mkdir($dir, 0750, true) && !is_dir($dir)) {
+        throw new RuntimeException('URL管理ディレクトリを作成できませんでした。');
+    }
+    $handle = fopen($dir . '/url-map.lock', 'c+');
+    if ($handle === false) {
+        throw new RuntimeException('URL管理情報をロックできませんでした。');
+    }
+
+    try {
+        if (!flock($handle, LOCK_EX)) {
+            throw new RuntimeException('URL管理情報をロックできませんでした。');
+        }
+        return $callback();
+    } finally {
+        @flock($handle, LOCK_UN);
+        fclose($handle);
+    }
+}
+
+function persist_url_project_metadata(array $project, array $map, array $pageOrder): void
+{
+    $mapJson = json_encode($map, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    $orderJson = json_encode(['files' => array_values(array_unique(array_map('strval', $pageOrder)))], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    if ($mapJson === false || $orderJson === false) {
+        throw new RuntimeException('URL管理情報を保存できませんでした。');
+    }
+
+    $mapPath = url_project_map_path($project);
+    $orderPath = project_page_order_path($project);
+    $oldMap = is_file($mapPath) ? file_get_contents($mapPath) : false;
+    $oldOrder = is_file($orderPath) ? file_get_contents($orderPath) : false;
+
+    try {
+        atomic_write_project_file($orderPath, $orderJson, 'ページ順を保存できませんでした。');
+        atomic_write_project_file($mapPath, $mapJson, 'URL管理情報を保存できませんでした。');
+    } catch (Throwable $e) {
+        try {
+            if ($oldOrder === false) {
+                @unlink($orderPath);
+            } else {
+                atomic_write_project_file($orderPath, $oldOrder, 'ページ順を復元できませんでした。');
+            }
+            if ($oldMap === false) {
+                @unlink($mapPath);
+            } else {
+                atomic_write_project_file($mapPath, $oldMap, 'URL管理情報を復元できませんでした。');
+            }
+        } catch (Throwable $restoreError) {
+            error_log('WebPatch URL metadata rollback failed: ' . $restoreError->getMessage());
+        }
+        throw $e;
+    }
+}
+
 function url_project_saved_basic_auth(array $map): ?array
 {
     $saved = $map['basic_auth'] ?? null;
@@ -2847,54 +3316,23 @@ function fetch_url_project_asset(array $project, string $sourceUrl): array
     $sourceUrl = url_project_asset_source($project, $sourceUrl);
     $map = url_project_map($project);
     $basicAuth = url_project_saved_basic_auth($map);
-    $buffer = '';
-    $ch = curl_init($sourceUrl);
-    if ($ch === false) {
-        throw new RuntimeException('アセット取得を開始できませんでした。');
+    $projectHost = strtolower((string) ($map['host'] ?? ''));
+    if ($projectHost === '') {
+        throw new RuntimeException('基準ドメインを確認できません。');
     }
-    curl_setopt_array($ch, [
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS => 5,
-        CURLOPT_RETURNTRANSFER => false,
-        CURLOPT_TIMEOUT => WEBPATCH_URL_FETCH_TIMEOUT,
-        CURLOPT_CONNECTTIMEOUT => WEBPATCH_URL_FETCH_TIMEOUT,
-        CURLOPT_USERAGENT => 'WebPatch Asset Proxy/1.0',
-        CURLOPT_SSL_VERIFYPEER => true,
-        CURLOPT_WRITEFUNCTION => static function ($ch, string $chunk) use (&$buffer): int {
-            $buffer .= $chunk;
-            if (strlen($buffer) > WEBPATCH_MAX_URL_ASSET_BYTES) {
-                return 0;
-            }
-            return strlen($chunk);
-        },
-    ]);
-    if ($basicAuth !== null) {
-        curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
-        curl_setopt($ch, CURLOPT_USERPWD, (string) $basicAuth['username'] . ':' . (string) $basicAuth['password']);
-    }
-    curl_exec($ch);
-    $error = curl_error($ch);
-    $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-    $contentType = (string) curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
-    $effectiveUrl = normalize_import_url((string) curl_getinfo($ch, CURLINFO_EFFECTIVE_URL)) ?? $sourceUrl;
-    curl_close($ch);
-
-    if ($error !== '') {
-        throw new RuntimeException('アセット取得失敗');
-    }
-    if ($status !== 200) {
-        throw new RuntimeException('HTTP ' . $status);
-    }
-    if (!url_matches_project_host($effectiveUrl, $map)) {
-        throw new RuntimeException('別ドメインへリダイレクト');
-    }
-    if (strlen($buffer) > WEBPATCH_MAX_URL_ASSET_BYTES) {
-        throw new RuntimeException('アセットサイズが大きすぎます。');
-    }
+    $resource = fetch_allowed_remote_resource(
+        $sourceUrl,
+        $basicAuth,
+        $projectHost,
+        WEBPATCH_MAX_URL_ASSET_BYTES,
+        'WebPatch Asset Proxy/1.0'
+    );
+    $effectiveUrl = (string) $resource['effective_url'];
+    $contentType = (string) $resource['content_type'];
 
     $extension = strtolower(pathinfo((string) (parse_url($effectiveUrl, PHP_URL_PATH) ?? ''), PATHINFO_EXTENSION));
     return [
-        'body' => $buffer,
+        'body' => (string) $resource['body'],
         'content_type' => asset_mime_for_extension($extension, $contentType ?: null),
         'effective_url' => $effectiveUrl,
         'extension' => $extension,
@@ -2915,6 +3353,35 @@ function rewrite_url_project_css_asset_references(string $css, array $project, s
             return $matches[0];
         }
         return 'url("' . base_url($assetRoutePath . '?' . $tokenKey . '=' . rawurlencode($tokenValue) . '&source_url=' . rawurlencode($resolved)) . '")';
+    }, $css) ?? $css;
+}
+
+function rewrite_preview_css_asset_references(string $css, array $project, array $urlMap, string $currentFile, ?callable $routeBuilder): string
+{
+    $projectId = project_public_ref($project);
+    $isUrlProject = project_is_url_source($project);
+
+    return preg_replace_callback('/url\\(([^)]+)\\)/i', static function (array $matches) use ($project, $urlMap, $currentFile, $routeBuilder, $projectId, $isUrlProject): string {
+        $raw = trim($matches[1], " \t\n\r\0\x0B'\"");
+        if ($raw === '' || preg_match('/^(?:data:|blob:|#)/i', $raw)) {
+            return $matches[0];
+        }
+
+        if ($isUrlProject) {
+            if (should_skip_url_source_rewrite($raw)) {
+                return $matches[0];
+            }
+            $rewritten = url_project_preview_target($project, $urlMap, $currentFile, $raw, false, $routeBuilder);
+            return 'url("' . $rewritten . '")';
+        }
+
+        if (!should_rewrite_embedded_url($raw)) {
+            return $matches[0];
+        }
+
+        $resolved = resolve_relative_file($currentFile, $raw);
+        $rewritten = $routeBuilder ? $routeBuilder($projectId, $resolved, false) : route_for_embedded_file($projectId, $resolved, false);
+        return 'url("' . $rewritten . '")';
     }, $css) ?? $css;
 }
 
@@ -3026,6 +3493,24 @@ function rewrite_html_for_preview(string $html, array $project, string $currentF
                 $element->setAttribute('data-webpatch-original-srcset', $originalSrcset);
             }
             $element->setAttribute('srcset', implode(', ', $rewritten));
+        }
+
+        if ($element->hasAttribute('style')) {
+            $style = $element->getAttribute('style');
+            $rewrittenStyle = rewrite_preview_css_asset_references($style, $project, $urlMap, $currentFile, $routeBuilder);
+            if ($rewrittenStyle !== $style) {
+                $element->setAttribute('data-webpatch-original-style', $style);
+                $element->setAttribute('style', $rewrittenStyle);
+            }
+        }
+
+        if (strtolower($element->tagName) === 'style') {
+            $style = $element->textContent;
+            $rewrittenStyle = rewrite_preview_css_asset_references($style, $project, $urlMap, $currentFile, $routeBuilder);
+            if ($rewrittenStyle !== $style) {
+                $element->nodeValue = '';
+                $element->appendChild($dom->createTextNode($rewrittenStyle));
+            }
         }
 
         // Do not rewrite inline script bodies here. Replacing script text through
@@ -3143,54 +3628,297 @@ function normalize_basic_auth_credentials(array $basicAuth): ?array
     return ['username' => $username, 'password' => $password];
 }
 
-function fetch_import_html(string $url, ?array $basicAuth = null): array
+function public_import_host_address(string $host): string
 {
-    $buffer = '';
-    $ch = curl_init($url);
-    if ($ch === false) {
-        throw new RuntimeException('URL取得を開始できませんでした。');
-    }
-    curl_setopt_array($ch, [
-        CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS => 5,
-        CURLOPT_RETURNTRANSFER => false,
-        CURLOPT_TIMEOUT => WEBPATCH_URL_FETCH_TIMEOUT,
-        CURLOPT_CONNECTTIMEOUT => WEBPATCH_URL_FETCH_TIMEOUT,
-        CURLOPT_USERAGENT => 'WebPatch URL Importer/1.0',
-        CURLOPT_SSL_VERIFYPEER => true,
-        CURLOPT_WRITEFUNCTION => static function ($ch, string $chunk) use (&$buffer): int {
-            $buffer .= $chunk;
-            if (strlen($buffer) > WEBPATCH_MAX_URL_HTML_BYTES) {
-                return 0;
+    $host = trim($host, '[]');
+    $addresses = [];
+    if (filter_var($host, FILTER_VALIDATE_IP)) {
+        $addresses[] = $host;
+    } else {
+        $records = dns_get_record($host, DNS_A | DNS_AAAA);
+        if (is_array($records)) {
+            foreach ($records as $record) {
+                $address = (string) ($record['ip'] ?? $record['ipv6'] ?? '');
+                if ($address !== '') {
+                    $addresses[] = $address;
+                }
             }
-            return strlen($chunk);
-        },
-    ]);
-    if ($basicAuth !== null) {
-        curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
-        curl_setopt($ch, CURLOPT_USERPWD, (string) $basicAuth['username'] . ':' . (string) $basicAuth['password']);
+        }
+        if ($addresses === []) {
+            $fallback = gethostbynamel($host);
+            if (is_array($fallback)) {
+                $addresses = array_merge($addresses, $fallback);
+            }
+        }
     }
-    curl_exec($ch);
-    $error = curl_error($ch);
-    $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-    $contentType = (string) curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
-    $effectiveUrl = normalize_import_url((string) curl_getinfo($ch, CURLINFO_EFFECTIVE_URL)) ?? $url;
-    curl_close($ch);
 
-    if ($error !== '') {
-        throw new RuntimeException('取得失敗');
+    $addresses = array_values(array_unique($addresses));
+    if ($addresses === []) {
+        throw new RuntimeException('URLのホストを解決できませんでした。');
     }
-    if ($status !== 200) {
-        throw new RuntimeException('HTTP ' . $status);
+    foreach ($addresses as $address) {
+        if (filter_var($address, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false) {
+            throw new RuntimeException('内部ネットワークまたは予約IPのURLは取得できません。');
+        }
     }
-    if (!preg_match('/(?:text\/html|application\/xhtml\+xml)/i', $contentType)) {
+
+    usort($addresses, static fn (string $left, string $right): int => (str_contains($left, ':') ? 1 : 0) <=> (str_contains($right, ':') ? 1 : 0));
+    return $addresses[0];
+}
+
+function validated_import_request(string $url, ?string $allowedHost = null): array
+{
+    $normalized = normalize_import_url($url);
+    if ($normalized === null) {
+        throw new RuntimeException('取得URLが不正です。');
+    }
+    $parts = parse_url($normalized);
+    $host = strtolower((string) ($parts['host'] ?? ''));
+    if ($allowedHost !== null && $host !== strtolower($allowedHost)) {
+        throw new RuntimeException('別ドメインのURLは取得できません。');
+    }
+    $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+    $port = isset($parts['port']) ? (int) $parts['port'] : ($scheme === 'https' ? 443 : 80);
+    if (!in_array($port, [80, 443], true)) {
+        throw new RuntimeException('標準ポート以外のURLは取得できません。');
+    }
+
+    return [
+        'url' => $normalized,
+        'host' => $host,
+        'scheme' => $scheme,
+        'port' => $port,
+        'address' => public_import_host_address($host),
+    ];
+}
+
+function fetch_allowed_remote_resource(
+    string $url,
+    ?array $basicAuth,
+    ?string $allowedHost,
+    int $maximumBytes,
+    string $userAgent
+): array
+{
+    $currentUrl = $url;
+    $previousScheme = '';
+
+    for ($redirects = 0; $redirects <= 5; $redirects++) {
+        $request = validated_import_request($currentUrl, $allowedHost);
+        if ($previousScheme === 'https' && $request['scheme'] !== 'https') {
+            throw new RuntimeException('HTTPSからHTTPへのリダイレクトは許可されていません。');
+        }
+
+        $buffer = '';
+        $location = '';
+        $ch = curl_init($request['url']);
+        if ($ch === false) {
+            throw new RuntimeException('URL取得を開始できませんでした。');
+        }
+        $resolveAddress = str_contains($request['address'], ':') ? '[' . $request['address'] . ']' : $request['address'];
+        $options = [
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_RETURNTRANSFER => false,
+            CURLOPT_TIMEOUT => WEBPATCH_URL_FETCH_TIMEOUT,
+            CURLOPT_CONNECTTIMEOUT => WEBPATCH_URL_FETCH_TIMEOUT,
+            CURLOPT_USERAGENT => $userAgent,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_SSL_VERIFYHOST => 2,
+            CURLOPT_RESOLVE => [$request['host'] . ':' . $request['port'] . ':' . $resolveAddress],
+            CURLOPT_HEADERFUNCTION => static function ($ch, string $header) use (&$location): int {
+                if (stripos($header, 'Location:') === 0) {
+                    $location = trim(substr($header, 9));
+                }
+                return strlen($header);
+            },
+            CURLOPT_WRITEFUNCTION => static function ($ch, string $chunk) use (&$buffer, $maximumBytes): int {
+                $buffer .= $chunk;
+                if (strlen($buffer) > $maximumBytes) {
+                    return 0;
+                }
+                return strlen($chunk);
+            },
+        ];
+        if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTP') && defined('CURLPROTO_HTTPS')) {
+            $options[CURLOPT_PROTOCOLS] = CURLPROTO_HTTP | CURLPROTO_HTTPS;
+        }
+        curl_setopt_array($ch, $options);
+        if ($basicAuth !== null) {
+            curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+            curl_setopt($ch, CURLOPT_USERPWD, (string) $basicAuth['username'] . ':' . (string) $basicAuth['password']);
+        }
+
+        curl_exec($ch);
+        $error = curl_error($ch);
+        $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $contentType = (string) curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
+        curl_close($ch);
+
+        if ($error !== '') {
+            throw new RuntimeException(strlen($buffer) > $maximumBytes ? '取得サイズが上限を超えています。' : '取得失敗');
+        }
+        if ($status >= 300 && $status < 400 && $location !== '') {
+            if ($redirects >= 5) {
+                throw new RuntimeException('リダイレクト回数が上限を超えています。');
+            }
+            $nextUrl = resolve_url_reference($request['url'], $location);
+            $nextRequest = validated_import_request($nextUrl, $allowedHost);
+            if ($request['scheme'] === 'https' && $nextRequest['scheme'] !== 'https') {
+                throw new RuntimeException('HTTPSからHTTPへのリダイレクトは許可されていません。');
+            }
+            $previousScheme = $request['scheme'];
+            $currentUrl = $nextRequest['url'];
+            continue;
+        }
+        if ($status !== 200) {
+            throw new RuntimeException('HTTP ' . $status);
+        }
+        return ['body' => $buffer, 'effective_url' => $request['url'], 'content_type' => $contentType];
+    }
+
+    throw new RuntimeException('リダイレクト回数が上限を超えています。');
+}
+
+function fetch_import_html(string $url, ?array $basicAuth = null, ?string $allowedHost = null): array
+{
+    $resource = fetch_allowed_remote_resource(
+        $url,
+        $basicAuth,
+        $allowedHost,
+        WEBPATCH_MAX_URL_HTML_BYTES,
+        'WebPatch URL Importer/1.0'
+    );
+    if (!preg_match('/(?:text\/html|application\/xhtml\+xml)/i', (string) $resource['content_type'])) {
         throw new RuntimeException('HTMLではありません');
     }
-    if (trim($buffer) === '') {
+    if (trim((string) $resource['body']) === '') {
         throw new RuntimeException('HTMLが空です');
     }
 
-    return ['html' => $buffer, 'effective_url' => $effectiveUrl, 'content_type' => $contentType];
+    return [
+        'html' => (string) $resource['body'],
+        'effective_url' => (string) $resource['effective_url'],
+        'content_type' => (string) $resource['content_type'],
+    ];
+}
+
+function imported_html_global_head_assets(string $html): array
+{
+    if (!preg_match('~<!--\s*INC:res/global/head\s*-->(.*?)<!--\s*/INC:res/global/head\s*-->~is', $html, $matches)) {
+        return ['styles' => [], 'jquery' => ''];
+    }
+
+    $block = (string) $matches[1];
+    $styles = [];
+    if (preg_match_all('/<link\b[^>]*>/i', $block, $linkMatches)) {
+        foreach ($linkMatches[0] as $tag) {
+            if (!preg_match('/\brel\s*=\s*(["\'])stylesheet\1/i', $tag)) {
+                continue;
+            }
+            if (!preg_match('/\bhref\s*=\s*(["\'])(.*?)\1/i', $tag, $hrefMatch)) {
+                continue;
+            }
+            $href = html_entity_decode((string) $hrefMatch[2], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            if ($href !== '') {
+                $styles[$href] = trim((string) $tag);
+            }
+        }
+    }
+
+    $jquery = '';
+    if (preg_match_all('/<script\b[^>]*\bsrc\s*=\s*(["\'])(.*?)\1[^>]*>\s*<\/script>/i', $block, $scriptMatches, PREG_SET_ORDER)) {
+        foreach ($scriptMatches as $scriptMatch) {
+            $src = html_entity_decode((string) $scriptMatch[2], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+            if (preg_match('~(?:^|/)jquery(?:[.-][^/]*)?\.js(?:[?#].*)?$~i', $src)) {
+                // The imported page can contain non-deferred legacy scripts at the end of body.
+                // Load the core library synchronously so those scripts can safely use jQuery.
+                $jquery = preg_replace('/\s+defer(?:\s*=\s*(["\'])defer\1)?/i', '', trim((string) $scriptMatch[0])) ?? trim((string) $scriptMatch[0]);
+                break;
+            }
+        }
+    }
+
+    return ['styles' => $styles, 'jquery' => $jquery];
+}
+
+function imported_html_global_head_asset_score(array $assets): int
+{
+    return count(is_array($assets['styles'] ?? null) ? $assets['styles'] : [])
+        + (trim((string) ($assets['jquery'] ?? '')) !== '' ? 100 : 0);
+}
+
+function project_import_global_head_assets(array $project): array
+{
+    $best = ['styles' => [], 'jquery' => ''];
+    $files = array_values(array_unique(array_merge(
+        [(string) ($project['entry_file'] ?? '')],
+        project_html_files($project)
+    )));
+
+    foreach ($files as $file) {
+        if ($file === '' || !is_html_file($file)) {
+            continue;
+        }
+        try {
+            $html = file_get_contents(safe_project_file($project, $file));
+        } catch (Throwable $e) {
+            continue;
+        }
+        if (!is_string($html) || $html === '') {
+            continue;
+        }
+        $candidate = imported_html_global_head_assets($html);
+        if (imported_html_global_head_asset_score($candidate) > imported_html_global_head_asset_score($best)) {
+            $best = $candidate;
+        }
+    }
+
+    return $best;
+}
+
+function hydrate_import_html_global_head(string $html, array $assets): string
+{
+    if ($html === '' || imported_html_global_head_asset_score($assets) === 0) {
+        return $html;
+    }
+    if (preg_match('~<!--\s*(?:INC:res/global/head|WEBPATCH:hydrated-global-head)\s*-->~i', $html)) {
+        return $html;
+    }
+
+    $tags = [];
+    $styles = is_array($assets['styles'] ?? null) ? $assets['styles'] : [];
+    foreach ($styles as $href => $tag) {
+        $quotedHref = preg_quote((string) $href, '/');
+        if (preg_match('/<link\b[^>]*\bhref\s*=\s*(["\'])' . $quotedHref . '\1/i', $html)) {
+            continue;
+        }
+        $tags[] = (string) $tag;
+    }
+
+    $jquery = trim((string) ($assets['jquery'] ?? ''));
+    if ($jquery !== '' && preg_match('/\bsrc\s*=\s*(["\'])(.*?)\1/i', $jquery, $srcMatch)) {
+        $src = preg_quote(html_entity_decode((string) $srcMatch[2], ENT_QUOTES | ENT_HTML5, 'UTF-8'), '/');
+        if (!preg_match('/<script\b[^>]*\bsrc\s*=\s*(["\'])' . $src . '\1/i', $html)) {
+            $tags[] = $jquery;
+        }
+    }
+    if ($tags === []) {
+        return $html;
+    }
+
+    $block = "<!-- WEBPATCH:hydrated-global-head -->\n"
+        . implode("\n", $tags)
+        . "\n<!-- /WEBPATCH:hydrated-global-head -->\n";
+    if (preg_match('/<!--\s*INC:asset\/include\/head\s*-->/i', $html, $marker, PREG_OFFSET_CAPTURE)) {
+        $offset = (int) $marker[0][1];
+        return substr($html, 0, $offset) . $block . substr($html, $offset);
+    }
+    if (preg_match('/<\/head\s*>/i', $html, $headEnd, PREG_OFFSET_CAPTURE)) {
+        $offset = (int) $headEnd[0][1];
+        return substr($html, 0, $offset) . $block . substr($html, $offset);
+    }
+
+    return $html;
 }
 
 function upload_url_project(array $csvFile, string $title, string $baseUrl, int $userId, array $basicAuth = []): array
@@ -3246,7 +3974,7 @@ function upload_url_project(array $csvFile, string $title, string $baseUrl, int 
     $entryFile = '';
     foreach (array_keys($urls) as $url) {
         try {
-            $fetched = fetch_import_html($url, $basicAuthCredentials);
+            $fetched = fetch_import_html($url, $basicAuthCredentials, $baseHost);
             $effectiveUrl = normalize_import_url((string) $fetched['effective_url']) ?? $url;
             $effectiveHost = strtolower((string) (parse_url($effectiveUrl, PHP_URL_HOST) ?? ''));
             if ($effectiveHost !== $baseHost) {
@@ -3275,6 +4003,32 @@ function upload_url_project(array $csvFile, string $title, string $baseUrl, int 
         throw new RuntimeException('取得できたHTMLページがありません。');
     }
 
+    $globalHeadAssets = ['styles' => [], 'jquery' => ''];
+    foreach (array_keys($fileToUrl) as $filePath) {
+        $candidatePath = $targetRoot . '/' . $filePath;
+        $candidateHtml = file_get_contents($candidatePath);
+        if (!is_string($candidateHtml)) {
+            continue;
+        }
+        $candidateAssets = imported_html_global_head_assets($candidateHtml);
+        if (imported_html_global_head_asset_score($candidateAssets) > imported_html_global_head_asset_score($globalHeadAssets)) {
+            $globalHeadAssets = $candidateAssets;
+        }
+    }
+    if (imported_html_global_head_asset_score($globalHeadAssets) > 0) {
+        foreach (array_keys($fileToUrl) as $filePath) {
+            $candidatePath = $targetRoot . '/' . $filePath;
+            $candidateHtml = file_get_contents($candidatePath);
+            if (!is_string($candidateHtml)) {
+                continue;
+            }
+            $hydratedHtml = hydrate_import_html_global_head($candidateHtml, $globalHeadAssets);
+            if ($hydratedHtml !== $candidateHtml) {
+                atomic_write_project_file($candidatePath, $hydratedHtml, '共通ヘッドを保存できませんでした。');
+            }
+        }
+    }
+
     $metadataDir = $targetRoot . '/_webpatch';
     if (!is_dir($metadataDir) && !mkdir($metadataDir, 0750, true) && !is_dir($metadataDir)) {
         throw new RuntimeException('管理ファイルを保存できませんでした。');
@@ -3299,12 +4053,120 @@ function upload_url_project(array $csvFile, string $title, string $baseUrl, int 
     return ['project_id' => $projectId, 'imported' => count($fileToUrl), 'skipped' => $skipped];
 }
 
-function refresh_url_project(array $project, array $basicAuth = []): array
+function add_url_project_page(array $project, string $rawUrl, array $basicAuth = []): array
+{
+    return with_url_project_lock(
+        $project,
+        static fn (): array => add_url_project_page_locked($project, $rawUrl, $basicAuth)
+    );
+}
+
+function add_url_project_page_locked(array $project, string $rawUrl, array $basicAuth = []): array
 {
     if (!project_is_url_source($project)) {
         throw new RuntimeException('URL登録サイトではありません。');
     }
 
+    $currentPageOrder = project_sidebar_html_files($project);
+    $map = url_project_map($project);
+    $fileToUrl = is_array($map['file_to_url'] ?? null) ? $map['file_to_url'] : [];
+    $urlToFile = is_array($map['url_to_file'] ?? null) ? $map['url_to_file'] : [];
+    $baseHost = strtolower((string) ($map['host'] ?? ''));
+    if ($baseHost === '') {
+        $baseHost = strtolower((string) (parse_url((string) ($map['base_url'] ?? ''), PHP_URL_HOST) ?? ''));
+    }
+    if ($baseHost === '') {
+        throw new RuntimeException('基準ドメインを確認できません。');
+    }
+
+    $url = normalize_import_url(trim($rawUrl));
+    if ($url === null) {
+        throw new RuntimeException('追加するURLを正しく入力してください。');
+    }
+    $host = strtolower((string) (parse_url($url, PHP_URL_HOST) ?? ''));
+    if ($host !== $baseHost) {
+        throw new RuntimeException('基準URLと同じドメインのページだけ追加できます。');
+    }
+    if (isset($urlToFile[$url])) {
+        throw new RuntimeException('このURLはすでに登録されています。');
+    }
+    if (count($fileToUrl) >= WEBPATCH_MAX_URL_IMPORTS) {
+        throw new RuntimeException('URL登録ページは最大' . WEBPATCH_MAX_URL_IMPORTS . '件までです。');
+    }
+
+    $newBasicAuthProvided = basic_auth_input_was_provided($basicAuth);
+    $savedBasicAuthCredentials = url_project_saved_basic_auth($map);
+    $basicAuthCredentials = $newBasicAuthProvided
+        ? normalize_basic_auth_credentials($basicAuth)
+        : $savedBasicAuthCredentials;
+
+    $fetched = fetch_import_html($url, $basicAuthCredentials, $baseHost);
+    $effectiveUrl = normalize_import_url((string) $fetched['effective_url']) ?? $url;
+    $effectiveHost = strtolower((string) (parse_url($effectiveUrl, PHP_URL_HOST) ?? ''));
+    if ($effectiveHost !== $baseHost) {
+        throw new RuntimeException('別ドメインへリダイレクトされたため追加できません。');
+    }
+    if (isset($urlToFile[$effectiveUrl])) {
+        throw new RuntimeException('リダイレクト先のURLはすでに登録されています。');
+    }
+
+    $root = realpath(project_root($project));
+    if ($root === false) {
+        throw new RuntimeException('プロジェクトファイルが見つかりません。');
+    }
+    $usedFiles = array_fill_keys(array_keys($fileToUrl), true);
+    $filePath = file_path_for_import_url($effectiveUrl, $usedFiles);
+    $target = $root . '/' . $filePath;
+    $targetDir = dirname($target);
+    if (!is_dir($targetDir) && !mkdir($targetDir, 0750, true) && !is_dir($targetDir)) {
+        throw new RuntimeException('保存ディレクトリを作成できませんでした。');
+    }
+    $realTargetDir = realpath($targetDir);
+    if ($realTargetDir === false || ($realTargetDir !== $root && !str_starts_with($realTargetDir, $root . '/'))) {
+        throw new RuntimeException('保存先が不正です。');
+    }
+    $html = hydrate_import_html_global_head((string) $fetched['html'], project_import_global_head_assets($project));
+    atomic_write_project_file($target, $html, 'HTMLページを保存できませんでした。');
+
+    $urlToFile[$url] = $filePath;
+    $urlToFile[$effectiveUrl] = $filePath;
+    $fileToUrl[$filePath] = $effectiveUrl;
+    $map['url_to_file'] = $urlToFile;
+    $map['file_to_url'] = $fileToUrl;
+    if ($newBasicAuthProvided) {
+        $map['basic_auth'] = $basicAuthCredentials;
+    } elseif ($savedBasicAuthCredentials !== null) {
+        $map['basic_auth'] = $savedBasicAuthCredentials;
+    }
+
+    try {
+        persist_url_project_metadata($project, $map, array_merge($currentPageOrder, [$filePath]));
+    } catch (Throwable $e) {
+        @unlink($target);
+        throw $e;
+    }
+
+    $stmt = db()->prepare('UPDATE ' . table_name('projects') . ' SET updated_at = NOW() WHERE id = ?');
+    $stmt->execute([(int) $project['id']]);
+
+    return ['file' => $filePath, 'url' => $effectiveUrl];
+}
+
+function refresh_url_project(array $project, array $basicAuth = [], ?array $csvFile = null): array
+{
+    return with_url_project_lock(
+        $project,
+        static fn (): array => refresh_url_project_locked($project, $basicAuth, $csvFile)
+    );
+}
+
+function refresh_url_project_locked(array $project, array $basicAuth = [], ?array $csvFile = null): array
+{
+    if (!project_is_url_source($project)) {
+        throw new RuntimeException('URL登録サイトではありません。');
+    }
+
+    $currentPageOrder = project_sidebar_html_files($project);
     $map = url_project_map($project);
     $fileToUrl = is_array($map['file_to_url'] ?? null) ? $map['file_to_url'] : [];
     if ($fileToUrl === []) {
@@ -3328,6 +4190,42 @@ function refresh_url_project(array $project, array $basicAuth = []): array
     $urlToFile = is_array($map['url_to_file'] ?? null) ? $map['url_to_file'] : [];
     $skipped = [];
     $removedFiles = [];
+    $addedFiles = [];
+    $additionalUrls = [];
+    $csvProvided = is_array($csvFile) && (($csvFile['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_NO_FILE);
+    $globalHeadAssets = project_import_global_head_assets($project);
+
+    if ($csvProvided) {
+        $rows = csv_upload_rows($csvFile);
+        if ($rows === []) {
+            throw new RuntimeException('CSVにURLがありません。');
+        }
+        if (count($rows) > WEBPATCH_MAX_URL_IMPORTS) {
+            throw new RuntimeException('URLリストCSVは最大' . WEBPATCH_MAX_URL_IMPORTS . '件までです。');
+        }
+
+        foreach ($rows as $rawUrl) {
+            $normalized = normalize_import_url($rawUrl);
+            if ($normalized === null) {
+                $skipped[] = ['url' => $rawUrl, 'reason' => 'URL形式が不正'];
+                continue;
+            }
+            $host = strtolower((string) (parse_url($normalized, PHP_URL_HOST) ?? ''));
+            if ($host !== $baseHost) {
+                $skipped[] = ['url' => $rawUrl, 'reason' => '別ドメイン'];
+                continue;
+            }
+            if (isset($urlToFile[$normalized]) || isset($additionalUrls[$normalized])) {
+                $skipped[] = ['url' => $rawUrl, 'reason' => '重複'];
+                continue;
+            }
+            $additionalUrls[$normalized] = true;
+        }
+
+        if (count($fileToUrl) + count($additionalUrls) > WEBPATCH_MAX_URL_IMPORTS) {
+            throw new RuntimeException('URL登録ページは合計' . WEBPATCH_MAX_URL_IMPORTS . '件までです。');
+        }
+    }
 
     foreach ($fileToUrl as $file => $url) {
         $file = normalize_zip_path((string) $file);
@@ -3338,7 +4236,7 @@ function refresh_url_project(array $project, array $basicAuth = []): array
         }
 
         try {
-            $fetched = fetch_import_html($url, $basicAuthCredentials);
+            $fetched = fetch_import_html($url, $basicAuthCredentials, $baseHost);
             $effectiveUrl = normalize_import_url((string) $fetched['effective_url']) ?? $url;
             $effectiveHost = strtolower((string) (parse_url($effectiveUrl, PHP_URL_HOST) ?? ''));
             if ($effectiveHost !== $baseHost) {
@@ -3358,8 +4256,8 @@ function refresh_url_project(array $project, array $basicAuth = []): array
             if ($realTargetDir === false || ($realTargetDir !== $root && !str_starts_with($realTargetDir, $root . '/'))) {
                 throw new RuntimeException('保存先が不正です。');
             }
-            file_put_contents($target, (string) $fetched['html'], LOCK_EX);
-            chmod($target, 0640);
+            $html = hydrate_import_html_global_head((string) $fetched['html'], $globalHeadAssets);
+            atomic_write_project_file($target, $html, 'HTMLページを保存できませんでした。');
             $updatedFiles[] = $file;
             $urlToFile[$url] = $file;
             $urlToFile[$effectiveUrl] = $file;
@@ -3368,6 +4266,46 @@ function refresh_url_project(array $project, array $basicAuth = []): array
             if (in_array($e->getMessage(), ['HTTP 404', 'HTTP 410'], true)) {
                 $removedFiles[$file] = $url;
             }
+            $skipped[] = ['url' => $url, 'reason' => $e->getMessage()];
+        }
+    }
+
+    $usedFiles = array_fill_keys(array_keys($fileToUrl), true);
+    foreach (array_keys($additionalUrls) as $url) {
+        try {
+            $fetched = fetch_import_html($url, $basicAuthCredentials, $baseHost);
+            $effectiveUrl = normalize_import_url((string) $fetched['effective_url']) ?? $url;
+            $effectiveHost = strtolower((string) (parse_url($effectiveUrl, PHP_URL_HOST) ?? ''));
+            if ($effectiveHost !== $baseHost) {
+                throw new RuntimeException('別ドメインへリダイレクト');
+            }
+            if (isset($urlToFile[$effectiveUrl])) {
+                $skipped[] = ['url' => $url, 'reason' => '重複'];
+                continue;
+            }
+
+            $root = realpath(project_root($project));
+            if ($root === false) {
+                throw new RuntimeException('プロジェクトファイルが見つかりません。');
+            }
+            $filePath = file_path_for_import_url($effectiveUrl, $usedFiles);
+            $target = $root . '/' . $filePath;
+            $targetDir = dirname($target);
+            if (!is_dir($targetDir) && !mkdir($targetDir, 0750, true) && !is_dir($targetDir)) {
+                throw new RuntimeException('保存ディレクトリを作成できませんでした。');
+            }
+            $realTargetDir = realpath($targetDir);
+            if ($realTargetDir === false || ($realTargetDir !== $root && !str_starts_with($realTargetDir, $root . '/'))) {
+                throw new RuntimeException('保存先が不正です。');
+            }
+            $html = hydrate_import_html_global_head((string) $fetched['html'], $globalHeadAssets);
+            atomic_write_project_file($target, $html, 'HTMLページを保存できませんでした。');
+
+            $urlToFile[$url] = $filePath;
+            $urlToFile[$effectiveUrl] = $filePath;
+            $fileToUrl[$filePath] = $effectiveUrl;
+            $addedFiles[] = $filePath;
+        } catch (Throwable $e) {
             $skipped[] = ['url' => $url, 'reason' => $e->getMessage()];
         }
     }
@@ -3388,14 +4326,9 @@ function refresh_url_project(array $project, array $basicAuth = []): array
                 unset($urlToFile[$mappedUrl]);
             }
         }
-        try {
-            $target = safe_project_file($project, $file);
-            unlink($target);
-        } catch (Throwable $e) {
-        }
     }
 
-    if ($updatedFiles === [] && $removedFiles === []) {
+    if ($updatedFiles === [] && $removedFiles === [] && $addedFiles === []) {
         throw new RuntimeException('再取得できたHTMLページがありません。');
     }
 
@@ -3412,13 +4345,39 @@ function refresh_url_project(array $project, array $basicAuth = []): array
         $map['basic_auth'] = $savedBasicAuthCredentials;
     }
     $map['skipped'] = $skipped;
-    file_put_contents(url_project_map_path($project), json_encode($map, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT), LOCK_EX);
-    chmod(url_project_map_path($project), 0640);
+    $nextPageOrder = [];
+    $nextPageLookup = [];
+    foreach (array_merge($currentPageOrder, $addedFiles, array_keys($fileToUrl)) as $file) {
+        $file = (string) $file;
+        if (isset($fileToUrl[$file]) && !isset($nextPageLookup[$file])) {
+            $nextPageOrder[] = $file;
+            $nextPageLookup[$file] = true;
+        }
+    }
+    try {
+        persist_url_project_metadata($project, $map, $nextPageOrder);
+    } catch (Throwable $e) {
+        foreach ($addedFiles as $addedFile) {
+            try {
+                @unlink(safe_project_file($project, $addedFile));
+            } catch (Throwable $cleanupError) {
+            }
+        }
+        throw $e;
+    }
+
+    foreach ($removedFiles as $file => $url) {
+        try {
+            @unlink(safe_project_file($project, $file));
+        } catch (Throwable $e) {
+            error_log('WebPatch removed URL page cleanup failed: ' . $e->getMessage());
+        }
+    }
 
     $stmt = db()->prepare('UPDATE ' . table_name('projects') . ' SET entry_file = ?, updated_at = NOW() WHERE id = ?');
     $stmt->execute([$entryFile, (int) $project['id']]);
 
-    return ['updated' => count($updatedFiles), 'removed' => count($removedFiles), 'skipped' => $skipped, 'entry_file' => $entryFile];
+    return ['updated' => count($updatedFiles), 'added' => count($addedFiles), 'removed' => count($removedFiles), 'skipped' => $skipped, 'entry_file' => $entryFile];
 }
 
 function extract_zip_upload_to_storage(array $file, int $userId): array

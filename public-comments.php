@@ -125,11 +125,12 @@ function public_save_comment_images(int $projectId, int $commentId): void
     }
 }
 
-function public_comments_payload(int $projectId, ?string $file, string $guestKey = ''): array
+function public_comments_payload(int $projectId, ?string $file, string $guestKey = '', int $publicLinkId = 0): array
 {
     ensure_comment_confirmation_columns();
     ensure_comment_viewport_column();
     ensure_comment_client_share_column();
+    ensure_comment_ai_check_columns();
     $where = 'WHERE c.project_id = ? AND c.client_share_id IS NULL';
     $params = [$projectId];
     if ($file !== null) {
@@ -138,7 +139,7 @@ function public_comments_payload(int $projectId, ?string $file, string $guestKey
     }
 
     $stmt = db()->prepare(
-        'SELECT c.id, c.file_path, c.selector, c.viewport_mode, c.body, c.parent_id, c.guest_name, c.guest_key, c.resolved_at, c.confirmation_pending_at, c.created_at, u.name AS user_name
+        'SELECT c.id, c.file_path, c.selector, c.viewport_mode, c.body, c.parent_id, c.guest_name, c.guest_key, c.ai_check_status, c.ai_check_summary, c.ai_checked_at, c.ai_check_provider, c.ai_check_model, c.resolved_at, c.confirmation_pending_at, c.created_at, u.name AS user_name
            FROM ' . table_name('comments') . ' c
            LEFT JOIN ' . table_name('users') . ' u ON u.id = c.user_id
           ' . $where . '
@@ -166,6 +167,11 @@ function public_comments_payload(int $projectId, ?string $file, string $guestKey
             'is_confirmation_pending' => $row['confirmation_pending_at'] !== null,
             'confirmation_pending_at' => $row['confirmation_pending_at'],
             'user_name' => $row['user_name'] ?: ($row['guest_name'] ?: 'ゲスト'),
+            'ai_check_status' => normalize_ai_check_status((string) ($row['ai_check_status'] ?? 'unchecked')),
+            'ai_check_summary' => $row['ai_check_summary'] ?? '',
+            'ai_checked_at' => $row['ai_checked_at'],
+            'ai_check_provider' => $row['ai_check_provider'] ?? '',
+            'ai_check_model' => $row['ai_check_model'] ?? '',
             'created_at' => $row['created_at'],
             'images' => $images[(int) $row['id']] ?? [],
         ];
@@ -180,7 +186,87 @@ function public_comments_payload(int $projectId, ?string $file, string $guestKey
         }
     }
 
+    if ($threads !== [] && $guestKey !== '' && $publicLinkId > 0) {
+        ensure_public_comment_thread_reads_table();
+        $threadIds = array_keys($threads);
+        $placeholders = implode(',', array_fill(0, count($threadIds), '?'));
+        $readStmt = db()->prepare(
+            'SELECT thread_id, last_read_at
+               FROM ' . table_name('public_comment_thread_reads') . '
+              WHERE public_link_id = ?
+                AND project_id = ?
+                AND guest_key_hash = ?
+                AND thread_id IN (' . $placeholders . ')'
+        );
+        $readStmt->execute(array_merge([$publicLinkId, $projectId, hash('sha256', $guestKey)], $threadIds));
+        $lastReadByThread = [];
+        foreach ($readStmt->fetchAll() as $readRow) {
+            $lastReadByThread[(int) $readRow['thread_id']] = strtotime((string) $readRow['last_read_at']) ?: 0;
+        }
+
+        foreach ($threads as $threadId => &$thread) {
+            $latestOtherActivity = 0;
+            $lastReadAt = $lastReadByThread[(int) $threadId] ?? 0;
+            $unreadReplyCount = 0;
+            foreach (array_merge([$thread], $thread['replies']) as $comment) {
+                if (!empty($comment['is_own'])) {
+                    continue;
+                }
+                $createdAt = strtotime((string) ($comment['created_at'] ?? '')) ?: 0;
+                $latestOtherActivity = max($latestOtherActivity, $createdAt);
+                if ($comment['parent_id'] !== null && $createdAt > 0 && ($lastReadAt === 0 || $createdAt > $lastReadAt)) {
+                    $unreadReplyCount++;
+                }
+            }
+            $thread['has_unread_activity'] = $latestOtherActivity > 0 && ($lastReadAt === 0 || $latestOtherActivity > $lastReadAt);
+            $thread['unread_reply_count'] = $unreadReplyCount;
+        }
+        unset($thread);
+    }
+
     return array_values($threads);
+}
+
+function public_comments_result(array $project, ?string $file, string $guestKey, array $extra = []): array
+{
+    $projectId = (int) $project['id'];
+    $publicLinkId = (int) ($project['public_link_id'] ?? 0);
+    return array_merge($extra, [
+        'ok' => true,
+        'threads' => public_comments_payload($projectId, $file, $guestKey, $publicLinkId),
+        'page_states' => page_comment_marker_states_for_public_project($projectId, $publicLinkId, $guestKey),
+    ]);
+}
+
+function mark_public_comment_thread_read(array $project, string $file, string $guestKey, int $threadId): void
+{
+    ensure_public_comment_thread_reads_table();
+    $stmt = db()->prepare(
+        'SELECT id
+           FROM ' . table_name('comments') . '
+          WHERE id = ?
+            AND project_id = ?
+            AND file_path = ?
+            AND parent_id IS NULL
+            AND client_share_id IS NULL
+          LIMIT 1'
+    );
+    $stmt->execute([$threadId, (int) $project['id'], $file]);
+    if (!$stmt->fetchColumn()) {
+        throw new RuntimeException('既読にするコメントが見つかりません。');
+    }
+
+    $stmt = db()->prepare(
+        'INSERT INTO ' . table_name('public_comment_thread_reads') . ' (public_link_id, project_id, thread_id, guest_key_hash, last_read_at)
+         VALUES (?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE last_read_at = VALUES(last_read_at)'
+    );
+    $stmt->execute([
+        (int) ($project['public_link_id'] ?? 0),
+        (int) $project['id'],
+        $threadId,
+        hash('sha256', $guestKey),
+    ]);
 }
 
 try {
@@ -218,7 +304,7 @@ try {
             }
         }
         $guestKey = trim((string) ($_GET['guest_key'] ?? ''));
-        public_comments_response(['ok' => true, 'threads' => public_comments_payload((int) $project['id'], $file, $guestKey)]);
+        public_comments_response(public_comments_result($project, $file, $guestKey));
     }
 
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -244,7 +330,7 @@ try {
     $viewportMode = normalize_comment_viewport_mode((string) ($payload['viewport_mode'] ?? ''));
     $action = (string) ($payload['action'] ?? 'create');
 
-    if (!in_array($action, ['delete', 'resolve'], true) && ($body === '' || mb_strlen($body) > 2000)) {
+    if (!in_array($action, ['delete', 'resolve', 'mark_read'], true) && ($body === '' || mb_strlen($body) > 2000)) {
         throw new RuntimeException('コメントは1文字以上2000文字以内で入力してください。');
     }
     if ($guestName === '') {
@@ -253,6 +339,15 @@ try {
     $guestName = mb_substr($guestName, 0, 120);
     if ($guestKey === '' || !preg_match('/^[A-Za-z0-9_-]{24,80}$/', $guestKey)) {
         throw new RuntimeException('ゲスト識別情報を確認できませんでした。ページを再読み込みしてください。');
+    }
+
+    if ($action === 'mark_read') {
+        $commentId = (int) ($payload['comment_id'] ?? 0);
+        if ($commentId <= 0) {
+            throw new RuntimeException('既読にするコメントが見つかりません。');
+        }
+        mark_public_comment_thread_read($project, $file, $guestKey, $commentId);
+        public_comments_response(public_comments_result($project, $file, $guestKey, ['thread_id' => $commentId]));
     }
 
     if ($action === 'delete') {
@@ -339,7 +434,7 @@ try {
             $stmt->execute([$commentId, (int) $project['id'], $file]);
         }
 
-        public_comments_response(['ok' => true, 'focus_id' => $focusId, 'threads' => public_comments_payload((int) $project['id'], $file, $guestKey)]);
+        public_comments_response(public_comments_result($project, $file, $guestKey, ['focus_id' => $focusId]));
     }
 
     if ($action === 'update') {
@@ -368,12 +463,10 @@ try {
         reset_comment_ai_check_for_comment((int) $project['id'], $commentId);
         public_save_comment_images((int) $project['id'], $commentId);
 
-        public_comments_response([
-            'ok' => true,
+        public_comments_response(public_comments_result($project, $file, $guestKey, [
             'updated_id' => $commentId,
             'focus_id' => $comment['parent_id'] === null ? $commentId : (int) $comment['parent_id'],
-            'threads' => public_comments_payload((int) $project['id'], $file, $guestKey),
-        ]);
+        ]));
     }
 
     if ($action === 'resolve') {
@@ -398,32 +491,48 @@ try {
         $stmt = db()->prepare('UPDATE ' . table_name('comments') . ' SET resolved_at = ?, sheet_status = ? WHERE id = ? AND project_id = ? AND file_path = ? AND parent_id IS NULL AND client_share_id IS NULL');
         $stmt->execute([$resolved ? date('Y-m-d H:i:s') : null, $resolved ? 'done' : 'todo', $commentId, (int) $project['id'], $file]);
 
-        public_comments_response(['ok' => true, 'resolved' => $resolved, 'threads' => public_comments_payload((int) $project['id'], $file, $guestKey)]);
+        public_comments_response(public_comments_result($project, $file, $guestKey, ['resolved' => $resolved]));
     }
 
-    if ($parentId > 0) {
-        $stmt = db()->prepare('SELECT id FROM ' . table_name('comments') . ' WHERE id = ? AND project_id = ? AND file_path = ? AND parent_id IS NULL AND client_share_id IS NULL');
-        $stmt->execute([$parentId, (int) $project['id'], $file]);
-        if (!$stmt->fetch()) {
-            throw new RuntimeException('返信先のコメントが見つかりません。');
+    $createdCommentId = 0;
+    $pdo = db();
+    $pdo->beginTransaction();
+    try {
+        if ($parentId > 0) {
+            $stmt = $pdo->prepare('SELECT id FROM ' . table_name('comments') . ' WHERE id = ? AND project_id = ? AND file_path = ? AND parent_id IS NULL AND client_share_id IS NULL');
+            $stmt->execute([$parentId, (int) $project['id'], $file]);
+            if (!$stmt->fetch()) {
+                throw new RuntimeException('返信先のコメントが見つかりません。');
+            }
+            $stmt = $pdo->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?, ?)');
+            $stmt->execute([(int) $project['id'], $file, $guestName, $guestKey, $parentId, $body]);
+            $createdCommentId = (int) $pdo->lastInsertId();
+            $createdId = $parentId;
+            reset_comment_ai_checks((int) $project['id'], null, $parentId);
+            public_save_comment_images((int) $project['id'], $createdCommentId);
+        } else {
+            if ($selector === '' || mb_strlen($selector) > 255) {
+                throw new RuntimeException('コメント対象を選択してください。');
+            }
+            $file = resolve_comment_file_for_selector($project, $file, $selector);
+            $stmt = $pdo->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, ?)');
+            $stmt->execute([(int) $project['id'], $file, $selector, $viewportMode !== '' ? $viewportMode : null, $guestName, $guestKey, $body]);
+            $createdCommentId = (int) $pdo->lastInsertId();
+            $createdId = $createdCommentId;
+            public_save_comment_images((int) $project['id'], $createdCommentId);
         }
-        $stmt = db()->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, NULL, NULL, NULL, ?, ?, ?, ?)');
-        $stmt->execute([(int) $project['id'], $file, $guestName, $guestKey, $parentId, $body]);
-        $createdId = $parentId;
-        reset_comment_ai_checks((int) $project['id'], null, $parentId);
-        public_save_comment_images((int) $project['id'], (int) db()->lastInsertId());
-    } else {
-        if ($selector === '' || mb_strlen($selector) > 255) {
-            throw new RuntimeException('コメント対象を選択してください。');
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
         }
-        $file = resolve_comment_file_for_selector($project, $file, $selector);
-        $stmt = db()->prepare('INSERT INTO ' . table_name('comments') . ' (project_id, file_path, selector, viewport_mode, user_id, guest_name, guest_key, parent_id, body) VALUES (?, ?, ?, ?, NULL, ?, ?, NULL, ?)');
-        $stmt->execute([(int) $project['id'], $file, $selector, $viewportMode !== '' ? $viewportMode : null, $guestName, $guestKey, $body]);
-        $createdId = (int) db()->lastInsertId();
-        public_save_comment_images((int) $project['id'], $createdId);
+        if ($createdCommentId > 0) {
+            delete_comment_images_for_comments((int) $project['id'], [$createdCommentId]);
+        }
+        throw $e;
     }
 
-    public_comments_response(['ok' => true, 'created_id' => $createdId, 'threads' => public_comments_payload((int) $project['id'], $file, $guestKey)]);
+    public_comments_response(public_comments_result($project, $file, $guestKey, ['created_id' => $createdId]));
 } catch (Throwable $e) {
     public_comments_response(['ok' => false, 'message' => $e->getMessage()], 400);
 }

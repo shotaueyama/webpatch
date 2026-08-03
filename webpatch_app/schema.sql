@@ -221,6 +221,29 @@ CREATE TABLE IF NOT EXISTS webpatch_comment_thread_reads (
     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE IF NOT EXISTS webpatch_public_comment_thread_reads (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  public_link_id BIGINT UNSIGNED NOT NULL,
+  project_id BIGINT UNSIGNED NOT NULL,
+  thread_id BIGINT UNSIGNED NOT NULL,
+  guest_key_hash CHAR(64) NOT NULL,
+  last_read_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY webpatch_public_comment_reads_link_thread_guest_unique (public_link_id, thread_id, guest_key_hash),
+  KEY webpatch_public_comment_reads_link_project_guest_index (public_link_id, project_id, guest_key_hash),
+  KEY webpatch_public_comment_reads_thread_id_index (thread_id),
+  CONSTRAINT webpatch_public_comment_reads_link_id_foreign
+    FOREIGN KEY (public_link_id) REFERENCES webpatch_project_public_links (id)
+    ON DELETE CASCADE,
+  CONSTRAINT webpatch_public_comment_reads_project_id_foreign
+    FOREIGN KEY (project_id) REFERENCES webpatch_projects (id)
+    ON DELETE CASCADE,
+  CONSTRAINT webpatch_public_comment_reads_thread_id_foreign
+    FOREIGN KEY (thread_id) REFERENCES webpatch_comments (id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE IF NOT EXISTS webpatch_comment_images (
   id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
   project_id BIGINT UNSIGNED NOT NULL,

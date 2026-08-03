@@ -30,7 +30,7 @@ if ($isUrlSource) {
 $files = project_sidebar_html_files($project);
 $fileTitles = project_file_display_titles($project, $files);
 $fileCopyTargets = project_file_copy_targets($project, $files);
-$pageCommentMarkerStates = page_comment_marker_states_for_project((int) $project['id']);
+$pageCommentMarkerStates = page_comment_marker_states_for_project((int) $project['id'], null, false, (int) $user['id']);
 
 $activeFile = (string) ($_GET['file'] ?? $project['entry_file']);
 if (!in_array($activeFile, $files, true)) {
@@ -85,7 +85,15 @@ ob_start();
     </div>
     <section class="sidebar-tab-panel active" id="pages-tab" role="tabpanel" aria-labelledby="pages-tab-button" data-sidebar-panel="pages">
       <div class="project-summary">
-        <p class="eyebrow">Pages</p>
+        <div class="page-list-heading">
+          <p class="eyebrow">Pages</p>
+          <div class="page-search" data-page-search>
+            <input class="page-search-input" type="search" data-page-search-input placeholder="ページを検索" aria-label="ページを検索" autocomplete="off">
+            <button class="page-search-toggle" type="button" data-page-search-toggle aria-label="ページ検索を開く" aria-expanded="false" title="ページを検索">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="5.8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="m15.2 15.2 4.1 4.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+        </div>
         <h1>
           <?= h($project['title']) ?>
           <?php if (!$canManageProject): ?>
@@ -109,22 +117,48 @@ ob_start();
                 <?php
                   $markerState = (string) ($pageMarker['state'] ?? 'attention');
                   $markerCount = (int) ($pageMarker['count'] ?? 0);
-                  $markerLabel = $markerState === 'pending' ? '確認待ちコメント' : '未対応コメント';
+                  $markerUnreadCount = (int) ($pageMarker['unread_count'] ?? 0);
+                  $markerConfirmationCount = (int) ($pageMarker['confirmation_count'] ?? 0);
+                  $markerResolvedCount = (int) ($pageMarker['resolved_count'] ?? 0);
+                  $markerReplyCount = (int) ($pageMarker['reply_count'] ?? 0);
+                  $markerLabel = 'コメント';
                 ?>
-                <span class="page-comment-dot <?= $markerState === 'pending' ? 'pending' : 'attention' ?>" title="<?= h($markerLabel . ' ' . $markerCount . '件') ?>" aria-label="<?= h($markerLabel . ' ' . $markerCount . '件') ?>"></span>
+                <span class="page-comment-dot <?= $markerState === 'pending' ? 'pending' : ($markerState === 'completed' ? 'completed' : 'attention') ?>" title="<?= h($markerLabel . ' ' . $markerCount . '件（返信を含む）') ?>" aria-label="<?= h($markerLabel . ' ' . $markerCount . '件（返信を含む）') ?>">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.75 5.5h10.5A3.25 3.25 0 0 1 20.5 8.75v5.5a3.25 3.25 0 0 1-3.25 3.25h-3.9l-3.82 2.86a.72.72 0 0 1-1.15-.58V17.5H6.75A3.25 3.25 0 0 1 3.5 14.25v-5.5A3.25 3.25 0 0 1 6.75 5.5Z" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linejoin="round"/></svg>
+                  <span aria-hidden="true"><?= $markerCount > 99 ? '99+' : $markerCount ?></span>
+                </span>
               <?php endif; ?>
             </span>
+            <?php if ($pageMarker !== null): ?>
+              <span class="page-comment-stats" aria-label="<?= h('未読 ' . $markerUnreadCount . '件、確認 ' . $markerConfirmationCount . '件、完了 ' . $markerResolvedCount . '件、返信 ' . $markerReplyCount . '件') ?>">
+                <span class="page-comment-stat"><span>未読</span><strong class="page-unread-count<?= $markerUnreadCount > 0 ? ' has-value' : '' ?>" data-page-unread-count><?= $markerUnreadCount ?></strong></span>
+                <span class="page-comment-stat"><span>確認</span><strong data-page-confirmation-count><?= $markerConfirmationCount ?></strong></span>
+                <span class="page-comment-stat"><span>完了</span><strong data-page-resolved-count><?= $markerResolvedCount ?></strong></span>
+                <span class="page-comment-stat"><span>返信</span><strong data-page-reply-count><?= $markerReplyCount ?></strong></span>
+              </span>
+            <?php endif; ?>
             <span class="file-list-path"><?= h($file) ?></span>
           </a>
         <?php endforeach; ?>
+        <p class="page-search-empty" data-page-search-empty hidden>一致するページがありません。</p>
       </div>
       <?php if ($canRefreshUrl): ?>
         <div class="url-refresh-panel">
-          <h2>URLを再取得</h2>
-          <p>登録済みのURL一覧をもう一度取得して、保存済みHTMLを更新します。既存コメントは同じページに残ります。</p>
-          <form class="url-refresh-form" action="<?= h(base_url('refresh-url-project.php')) ?>" method="post">
+          <h2>URLページ管理</h2>
+          <p>URLを入力すると1ページだけ追加できます。登録済みページの更新や複数ページの追加にはCSV再取得を使用してください。</p>
+          <form class="url-refresh-form" action="<?= h(base_url('refresh-url-project.php')) ?>" method="post" enctype="multipart/form-data">
             <?= csrf_field() ?>
             <input type="hidden" name="project_id" value="<?= h($projectPublicRef) ?>">
+            <div class="field">
+              <label for="refresh_additional_url">1ページ追加URL</label>
+              <input id="refresh_additional_url" name="additional_url" type="url" inputmode="url" autocomplete="url" placeholder="https://example.com/new-page/">
+              <p class="help-text">基準URLと同じドメインのHTMLページを1件だけ追加します。</p>
+            </div>
+            <div class="field">
+              <label for="refresh_url_csv">URLリストCSV</label>
+              <input id="refresh_url_csv" name="url_csv" type="file" accept=".csv,text/csv">
+              <p class="help-text">追加したいURLがある場合のみ選択してください。既存ページの並び順は維持し、新規ページは末尾に追加します。</p>
+            </div>
             <div class="basic-auth-fields">
               <div class="field">
                 <label for="refresh_basic_auth_username">Basic認証ユーザー名</label>
@@ -142,7 +176,10 @@ ob_start();
                 <?php endif; ?>
               </p>
             </div>
-            <button class="secondary-button" type="submit">URLを再取得</button>
+            <div class="url-refresh-actions">
+              <button class="secondary-button" type="submit" name="refresh_action" value="add_url">1ページ追加</button>
+              <button class="secondary-button" type="submit" name="refresh_action" value="refresh">CSV・登録済みURLを再取得</button>
+            </div>
           </form>
         </div>
       <?php endif; ?>
@@ -469,6 +506,66 @@ ob_start();
     } else {
       mobileQuery.addListener(syncFilePanelPlacement);
     }
+  })();
+
+  (() => {
+    const search = document.querySelector('[data-page-search]');
+    const list = document.querySelector('.file-list');
+    if (!search || !list) {
+      return;
+    }
+
+    const toggle = search.querySelector('[data-page-search-toggle]');
+    const input = search.querySelector('[data-page-search-input]');
+    const empty = list.querySelector('[data-page-search-empty]');
+    const pages = Array.from(list.querySelectorAll('a'));
+
+    const normalize = (value) => value.toLocaleLowerCase('ja').normalize('NFKC');
+    const filterPages = () => {
+      const query = normalize(input.value.trim());
+      let visibleCount = 0;
+      pages.forEach((page) => {
+        const matches = query === '' || normalize(page.textContent || '').includes(query);
+        page.classList.toggle('page-search-hidden', !matches);
+        if (matches) {
+          visibleCount += 1;
+        }
+      });
+      if (empty) {
+        empty.hidden = visibleCount !== 0;
+      }
+    };
+
+    const openSearch = () => {
+      search.classList.add('open');
+      toggle.setAttribute('aria-expanded', 'true');
+      toggle.setAttribute('aria-label', 'ページ検索を閉じる');
+      window.requestAnimationFrame(() => input.focus());
+    };
+
+    const closeSearch = () => {
+      search.classList.remove('open');
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.setAttribute('aria-label', 'ページ検索を開く');
+      input.value = '';
+      filterPages();
+      toggle.focus();
+    };
+
+    toggle.addEventListener('click', () => {
+      if (search.classList.contains('open')) {
+        closeSearch();
+      } else {
+        openSearch();
+      }
+    });
+    input.addEventListener('input', filterPages);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeSearch();
+      }
+    });
   })();
 
   (() => {
@@ -915,6 +1012,7 @@ ob_start();
     let commentMode = false;
     let pendingDeleteComment = null;
     let hoverTarget = null;
+    const hoverGuardDocuments = new WeakSet();
 
     if (!iframe || !commentToggle || !list || !modal || !replyForm) {
       return;
@@ -1035,6 +1133,35 @@ ob_start();
       return parts[parts.length - 1] || file;
     };
     const displayFileLabel = (file) => pathWithoutRoot(file) || baseName(file);
+    const aiCheckStatusMeta = (status) => ({
+      unchecked: { label: '未確認', tone: 'unchecked' },
+      not_applicable: { label: '対象外', tone: 'not-applicable' },
+      reflected: { label: '反映済み', tone: 'reflected' },
+      not_reflected: { label: '未反映', tone: 'not-reflected' },
+      uncertain: { label: '判定不明', tone: 'uncertain' },
+      error: { label: 'エラー', tone: 'error' }
+    }[status] || { label: '未確認', tone: 'unchecked' });
+
+    const buildAiCheckResult = (thread) => {
+      const meta = aiCheckStatusMeta(thread.ai_check_status);
+      const result = document.createElement('div');
+      result.className = 'comment-ai-result';
+      const status = document.createElement('span');
+      status.className = `comment-ai-status is-${meta.tone}`;
+      status.textContent = `AI: ${meta.label}`;
+      const summary = String(thread.ai_check_summary || '').trim();
+      if (summary) {
+        status.title = summary;
+        const summaryText = document.createElement('small');
+        summaryText.className = 'comment-ai-summary';
+        summaryText.textContent = summary;
+        summaryText.title = summary;
+        result.append(status, summaryText);
+      } else {
+        result.append(status);
+      }
+      return result;
+    };
 
     const escapeCss = (value) => {
       if (window.CSS && typeof window.CSS.escape === 'function') {
@@ -1073,7 +1200,14 @@ ob_start();
         const sameTag = siblings.filter((sibling) => sibling.tagName.toLowerCase() === tag);
         const index = sameTag.indexOf(node) + 1;
         let part = tag;
-        const stableClasses = Array.from(node.classList).filter((className) => !className.startsWith('webpatch-'));
+        const stableClasses = Array.from(node.classList).filter((className) => {
+          if (className.startsWith('webpatch-')) {
+            return false;
+          }
+          return !/(^|[-_])(hover|hovered|active|focus|focused|open|opened|show|shown|visible|selected|current|expanded)([-_]|$)/i.test(className)
+            && !/^(is|has)[-_](on|hover|active|focus|open|show|visible|selected|current|expanded)$/i.test(className)
+            && className.toLowerCase() !== 'on';
+        });
         if (stableClasses.length > 0) {
           part += `.${escapeCss(stableClasses[0])}`;
         }
@@ -1092,6 +1226,26 @@ ob_start();
       }
 
       return parts.length > 0 ? parts.join(' > ') : 'body';
+    };
+
+    const installCommentHoverGuard = (doc) => {
+      if (!doc || hoverGuardDocuments.has(doc)) {
+        return;
+      }
+      hoverGuardDocuments.add(doc);
+      const stopSiteHover = (event) => {
+        if (!commentMode) {
+          return;
+        }
+        const target = event.target;
+        if (target && target.nodeType === 1 && target.closest('[data-webpatch-comment-marker], #webpatch-comment-marker-layer')) {
+          return;
+        }
+        event.stopImmediatePropagation();
+      };
+      ['mouseover', 'mouseenter', 'pointerover', 'pointerenter', 'pointermove'].forEach((type) => {
+        doc.addEventListener(type, stopSiteHover, true);
+      });
     };
 
     const formatCommentTime = (value) => {
@@ -1116,7 +1270,7 @@ ob_start();
     const buildMessage = (comment, thread) => {
       const item = document.createElement('div');
       item.className = 'comment-message';
-      item.classList.toggle('copyable', !comment.is_own);
+      item.classList.add('copyable');
       const meta = document.createElement('div');
       meta.className = 'comment-meta';
       const metaText = document.createElement('span');
@@ -1181,9 +1335,7 @@ ob_start();
         });
         item.append(gallery);
       }
-      if (!comment.is_own) {
-        item.addEventListener('click', () => copyCommentReference(comment, thread || comment));
-      }
+      item.addEventListener('click', () => copyCommentReference(comment, thread || comment));
       return item;
     };
 
@@ -1497,10 +1649,13 @@ ob_start();
     };
 
     const markThreadRead = async (thread) => {
-      if (!thread || !thread.id) {
+      if (!thread || !thread.id || !thread.has_unread_activity) {
         return;
       }
+      const previousUnreadActivity = Boolean(thread.has_unread_activity);
+      const previousUnreadReplyCount = Number(thread.unread_reply_count || 0);
       thread.has_unread_activity = false;
+      thread.unread_reply_count = 0;
       renderList();
       try {
         const response = await fetch('<?= h(base_url('comments.php')) ?>', {
@@ -1522,7 +1677,33 @@ ob_start();
           throw new Error(result.message || '既読状態を更新できませんでした。');
         }
       } catch (error) {
+        thread.has_unread_activity = previousUnreadActivity;
+        thread.unread_reply_count = previousUnreadReplyCount;
+        renderList();
+        showToast(error.message || '既読状態を更新できませんでした。', 'error');
       }
+    };
+
+    const syncActivePageUnreadMarker = () => {
+      const pageLink = document.querySelector(`[data-page-file="${escapeCss(activeFile)}"]`);
+      const stats = pageLink?.querySelector('.page-comment-stats');
+      const unreadCountElement = pageLink?.querySelector('[data-page-unread-count]');
+      const confirmationCountElement = pageLink?.querySelector('[data-page-confirmation-count]');
+      const resolvedCountElement = pageLink?.querySelector('[data-page-resolved-count]');
+      const replyCountElement = pageLink?.querySelector('[data-page-reply-count]');
+      if (!stats || !unreadCountElement || !confirmationCountElement || !resolvedCountElement || !replyCountElement) {
+        return;
+      }
+      const unreadCount = threads.filter((thread) => Boolean(thread.has_unread_activity)).length;
+      const confirmationCount = threads.filter((thread) => !thread.is_resolved && Boolean(thread.is_confirmation_pending)).length;
+      const resolvedCount = threads.filter((thread) => Boolean(thread.is_resolved)).length;
+      const replyCount = threads.reduce((total, thread) => total + (Array.isArray(thread.replies) ? thread.replies.length : 0), 0);
+      unreadCountElement.textContent = String(unreadCount);
+      unreadCountElement.classList.toggle('has-value', unreadCount > 0);
+      confirmationCountElement.textContent = String(confirmationCount);
+      resolvedCountElement.textContent = String(resolvedCount);
+      replyCountElement.textContent = String(replyCount);
+      stats.setAttribute('aria-label', `未読 ${unreadCount}件、確認 ${confirmationCount}件、完了 ${resolvedCount}件、返信 ${replyCount}件`);
     };
 
     const activateCommentFromList = async (thread) => {
@@ -1530,7 +1711,6 @@ ob_start();
         return;
       }
       focusCommentListItem(thread);
-      markThreadRead(thread);
       if (!scrollToThread(thread)) {
         renderList();
       }
@@ -1538,6 +1718,7 @@ ob_start();
 
     const renderList = () => {
       list.replaceChildren();
+      syncActivePageUnreadMarker();
       if (threads.length === 0) {
         const empty = document.createElement('p');
         empty.className = 'share-empty';
@@ -1581,16 +1762,24 @@ ob_start();
         clientLabel.textContent = thread.client_share_label ? `クライアント: ${thread.client_share_label}` : '';
         const body = document.createElement('small');
         body.textContent = thread.body;
-        const count = document.createElement('span');
-        count.textContent = `${thread.replies.length}件の返信`;
+        const aiResult = buildAiCheckResult(thread);
+        const replyCount = thread.replies.length;
         const actions = document.createElement('div');
         actions.className = 'comment-card-actions';
         const openButton = document.createElement('button');
         openButton.className = 'comment-card-action-button comment-open-button';
+        openButton.classList.toggle('has-replies', replyCount > 0);
         openButton.type = 'button';
-        openButton.setAttribute('aria-label', `コメント ${threadNumber(thread)} をポップアップで開く`);
+        openButton.setAttribute('aria-label', `コメント ${threadNumber(thread)} をポップアップで開く（返信${replyCount}件）`);
         openButton.title = 'ポップアップで開く';
         openButton.innerHTML = '<svg class="comment-card-action-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6.75 5.5h10.5A3.25 3.25 0 0 1 20.5 8.75v5.5a3.25 3.25 0 0 1-3.25 3.25h-3.9l-3.82 2.86a.72.72 0 0 1-1.15-.58V17.5H6.75A3.25 3.25 0 0 1 3.5 14.25v-5.5A3.25 3.25 0 0 1 6.75 5.5Z" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linejoin="round"/><path d="M8.25 10h7.5M8.25 13h5.25" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round"/></svg>';
+        if (replyCount > 0) {
+          const replyBadge = document.createElement('span');
+          replyBadge.className = 'comment-card-reply-badge';
+          replyBadge.textContent = replyCount > 99 ? '99+' : String(replyCount);
+          replyBadge.setAttribute('aria-hidden', 'true');
+          openButton.append(replyBadge);
+        }
         openButton.addEventListener('click', (event) => {
           event.preventDefault();
           event.stopPropagation();
@@ -1607,11 +1796,11 @@ ob_start();
           status.textContent = thread.is_resolved ? '解決済み' : 'ピン未検出';
           button.append(label, status, page);
           if (thread.client_share_label) button.append(clientLabel);
-          button.append(body, count, actions);
+          button.append(aiResult, body, actions);
         } else {
           button.append(label, page);
           if (thread.client_share_label) button.append(clientLabel);
-          button.append(body, count, actions);
+          button.append(aiResult, body, actions);
         }
         button.addEventListener('click', () => {
           activateCommentFromList(thread);
@@ -2484,6 +2673,7 @@ ob_start();
       }
       const doc = iframe.contentDocument;
       if (doc && doc.defaultView) {
+        installCommentHoverGuard(doc);
         doc.documentElement.classList.toggle('webpatch-comment-mode', commentMode);
         renderList();
         if (commentMode) {

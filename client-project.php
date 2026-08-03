@@ -32,7 +32,7 @@ $previewUrl = base_url('public-preview?client_token=' . rawurlencode($token) . '
     <meta name="robots" content="noindex,nofollow,noarchive">
     <title><?= h($project['title']) ?> | WebPatch クライアント共有</title>
     <link rel="icon" type="image/svg+xml" href="<?= h(base_url('favicon.svg')) ?>">
-    <link rel="stylesheet" href="<?= h(base_url('styles.css')) ?>">
+    <link rel="stylesheet" href="<?= h(base_url('styles.css?v=20260729-page-comment-vertical')) ?>">
   </head>
   <body>
     <div class="app-shell public-share-shell">
@@ -90,7 +90,10 @@ $previewUrl = base_url('public-preview?client_token=' . rawurlencode($token) . '
                           $markerCount = (int) ($pageMarker['count'] ?? 0);
                           $markerLabel = $markerState === 'pending' ? '確認待ちコメント' : '未対応コメント';
                         ?>
-                        <span class="page-comment-dot <?= $markerState === 'pending' ? 'pending' : 'attention' ?>" title="<?= h($markerLabel . ' ' . $markerCount . '件') ?>" aria-label="<?= h($markerLabel . ' ' . $markerCount . '件') ?>"></span>
+                        <span class="page-comment-dot <?= $markerState === 'pending' ? 'pending' : 'attention' ?>" title="<?= h($markerLabel . ' ' . $markerCount . '件（返信を含む）') ?>" aria-label="<?= h($markerLabel . ' ' . $markerCount . '件（返信を含む）') ?>">
+                          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.75 5.5h10.5A3.25 3.25 0 0 1 20.5 8.75v5.5a3.25 3.25 0 0 1-3.25 3.25h-3.9l-3.82 2.86a.72.72 0 0 1-1.15-.58V17.5H6.75A3.25 3.25 0 0 1 3.5 14.25v-5.5A3.25 3.25 0 0 1 6.75 5.5Z" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linejoin="round"/></svg>
+                          <span aria-hidden="true"><?= $markerCount > 99 ? '99+' : $markerCount ?></span>
+                        </span>
                       <?php endif; ?>
                     </span>
                     <span class="file-list-path"><?= h($file) ?></span>
@@ -329,6 +332,7 @@ $previewUrl = base_url('public-preview?client_token=' . rawurlencode($token) . '
         let pendingDeleteComment = null;
         let commentMode = true;
         let hoverTarget = null;
+        const hoverGuardDocuments = new WeakSet();
         const showToast = (message, type = 'success') => window.webpatchShowToast && window.webpatchShowToast(message, type);
         const guestKeyStorage = `webpatch-client-guest-key-${token}`;
         const randomGuestKey = () => {
@@ -481,7 +485,12 @@ $previewUrl = base_url('public-preview?client_token=' . rawurlencode($token) . '
             const siblings = Array.from(node.parentElement ? node.parentElement.children : []);
             const sameTag = siblings.filter((sibling) => sibling.tagName.toLowerCase() === tag);
             let part = tag;
-            const classes = Array.from(node.classList).filter((name) => !name.startsWith('webpatch-'));
+            const classes = Array.from(node.classList).filter((name) => {
+              if (name.startsWith('webpatch-')) return false;
+              return !/(^|[-_])(hover|hovered|active|focus|focused|open|opened|show|shown|visible|selected|current|expanded)([-_]|$)/i.test(name)
+                && !/^(is|has)[-_](on|hover|active|focus|open|show|visible|selected|current|expanded)$/i.test(name)
+                && name.toLowerCase() !== 'on';
+            });
             if (classes[0]) part += `.${escapeCss(classes[0])}`;
             if (sameTag.length > 1) part += `:nth-of-type(${sameTag.indexOf(node) + 1})`;
             parts.unshift(part);
@@ -489,6 +498,19 @@ $previewUrl = base_url('public-preview?client_token=' . rawurlencode($token) . '
             node = node.parentElement;
           }
           return parts.join(' > ') || 'body';
+        };
+        const installCommentHoverGuard = (doc) => {
+          if (!doc || hoverGuardDocuments.has(doc)) return;
+          hoverGuardDocuments.add(doc);
+          const stopSiteHover = (event) => {
+            if (!commentMode) return;
+            const target = event.target;
+            if (target && target.nodeType === 1 && target.closest('[data-webpatch-comment-marker], #webpatch-comment-marker-layer')) return;
+            event.stopImmediatePropagation();
+          };
+          ['mouseover', 'mouseenter', 'pointerover', 'pointerenter', 'pointermove'].forEach((type) => {
+            doc.addEventListener(type, stopSiteHover, true);
+          });
         };
         const formatCommentTime = (value) => {
           const text = String(value || '').trim();
@@ -1323,6 +1345,7 @@ $previewUrl = base_url('public-preview?client_token=' . rawurlencode($token) . '
           }
           const doc = iframe.contentDocument;
           if (!doc || !doc.defaultView) return;
+          installCommentHoverGuard(doc);
           doc.documentElement.classList.toggle('webpatch-comment-mode', commentMode);
           renderList();
           if (commentMode) {
